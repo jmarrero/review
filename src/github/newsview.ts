@@ -2,6 +2,7 @@
 
 import { h, link } from "../dom.ts";
 import type { Renderer } from "../markdown.ts";
+import { authorLabel } from "./authors.ts";
 import type { News } from "./news.ts";
 import { age, time } from "./view.ts";
 
@@ -25,7 +26,7 @@ export function newsList(news: News | undefined, render: Renderer, now: number =
           "div",
           { class: "sub" },
           n.harness ? h("span", { class: "kind k-harness" }, "harness") : null,
-          h("span", { class: "tag" }, `${n.repo}#${n.number} · ${n.author}`),
+          h("span", { class: "tag" }, `${n.repo}#${n.number} · ${authorLabel(n.author)}`),
           h("span", { class: "age", title: `merged ${time(n.mergedAt)}` }, `${age(n.mergedAt, now)} ago`),
         ),
         h("h3", {}, link(n.url, n.title)),

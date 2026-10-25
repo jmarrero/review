@@ -22,7 +22,7 @@ export interface StateInput {
 
 export function pageState(input: StateInput, now = Date.now()) {
   const active = input.active;
-  const sources: Sources = Object.fromEntries(["board", "heartbeat", "usage", "status", "queue", "decisions", "forge", "otherPrs", "runs"].map((name) => [name, { state: "pending" }]));
+  const sources: Sources = Object.fromEntries(["board", "heartbeat", "usage", "status", "queue", "decisions", "forge", "otherPrs", "people", "runs"].map((name) => [name, { state: "pending" }]));
   Object.assign(sources, active?.sources, input.sources);
   if (input.runs && !input.sources?.runs) sources.runs = { state: input.runs.state, checkedAt: input.runs.at, ...(input.runs.state === "ok" ? { fetchedAt: input.runs.at } : { error: input.runs.warnings.join(" ") }) };
   for (const [name, source] of Object.entries(sources)) sources[name] = { ...source };

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GitHub } from "../src/github/api.ts";
 import type { RawComment } from "../src/github/heartbeat.ts";
-import { findUsage, loadUsage, parseBudget, parseUsage, poolPace, tokenTotal, USAGE_CONFIG, USAGE_MARKER, usagePath } from "../src/github/usage.ts";
+import { findUsage, loadUsage, MAX_RUNS, parseBudget, parseUsage, poolPace, spendByRun, tokenTotal, UNKNOWN_KIND, USAGE_CONFIG, USAGE_MARKER, usagePath } from "../src/github/usage.ts";
 import { fixture, scriptedFetch } from "./helpers.ts";
 
 // The fixture's second comment is what bin/bot-heartbeat publish
@@ -32,9 +32,44 @@ describe("findUsage", () => {
     });
   });
   it("finds nothing among others' comments", () => assert.equal(findUsage(comments().slice(0, 1)), undefined));
+  // tracker's usage.yml snapshot, edited in place, after an older one still on the issue.
+  const snapshot = () => fixture<RawComment[]>("usage-snapshot.json");
+  it("reads the comment edited last, dated by its edit, whatever the order", () => {
+    for (const list of [snapshot(), snapshot().reverse()]) {
+      const u = findUsage(list);
+      assert.equal(u?.commentUrl, "https://github.com/jmarrero-forge/bot-ops/issues/1#issuecomment-11");
+      assert.equal(u?.updatedAt, "2026-10-18T14:42:00Z");
+      assert.deepEqual(u?.windows, []);
+      assert.deepEqual(u?.pools?.claude, { usedPercent: 73, allowedPercent: 73.2, resetsAt: "2026-10-19T23:00:00.000Z", observedAt: "2026-10-18T14:40:00.000Z", hold: false, windowMinutes: 10080 });
+      assert.deepEqual([u?.pools?.openai?.usedPercent, u?.pools?.openai?.hold], [1, false]);
+      assert.deepEqual(u?.mistral?.allowance, { limitUsd: 300, resetsAt: "2026-11-01T00:00:00Z", spentUsd: 41.25, estimated: false, unpriced: [], lowerBound: false });
+    }
+  });
+  it("prefers the comment's edit time to the JSON's updated_at, and the JSON's to none", () => {
+    const [old] = snapshot();
+    assert.equal(findUsage([{ ...old!, updated_at: "2026-10-18T15:00:00Z" }])?.updatedAt, "2026-10-18T15:00:00Z");
+    const { updated_at: _, ...undated } = old!;
+    assert.equal(findUsage([undated])?.updatedAt, "2026-10-15T17:42:00Z");
+    assert.equal(findUsage([{ ...old!, updated_at: "yesterday" }])?.updatedAt, "2026-10-15T17:42:00Z", "a malformed edit time is ignored");
+  });
 });
 
 describe("parseUsage", () => {
+  it("keeps null pools with counters or a valid snapshot timestamp", () => {
+    const raw = fixture<Record<string, unknown>>("usage-null-pools.json");
+    const parsed = parseUsage(body(raw));
+    assert.deepEqual(parsed?.pools, {});
+    assert.deepEqual(parsed?.windows, []);
+    assert.deepEqual(parsed?.mistral, { requests: 2500, tokens: 1234567 });
+    const empty = { ...raw, updated_at: undefined, observed_at: undefined, mistral: undefined };
+    for (const field of ["updated_at", "observed_at", "mistral"]) {
+      assert.ok(parseUsage(body({ ...empty, [field]: raw[field] })), field);
+    }
+    for (const edit of [{}, { updated_at: "now", observed_at: "soon", mistral: { requests: -1, tokens: 2 } }, { schema: "other" }]) {
+      assert.equal(parseUsage(body({ ...empty, ...edit })), undefined);
+    }
+  });
+
   it("accepts pool-only publications and drops malformed pools independently", () => {
     const raw = fixture<{ pools: Record<string, Record<string, unknown>> }>("usage-pools.json");
     assert.equal(parseUsage(body(raw))?.pools?.openai?.usedPercent, 80);
@@ -42,6 +77,17 @@ describe("parseUsage", () => {
       const parsed = parseUsage(body({ ...raw, pools: { ...raw.pools, openai: { ...raw.pools.openai, ...edit } } }));
       assert.equal(parsed?.pools?.openai, undefined);
       assert.equal(parsed?.pools?.claude?.usedPercent, 42);
+    }
+  });
+
+  it("keeps a held pool's next dispatch time, and none for a bad time or an unheld pool", () => {
+    const raw = fixture<{ pools: Record<string, Record<string, unknown>> }>("usage-pools.json");
+    const openai = (edit: Record<string, unknown>) => parseUsage(body({ ...raw, pools: { openai: { ...raw.pools.openai, ...edit } } }))?.pools?.openai;
+    assert.equal(openai({})?.nextDispatchAt, "2026-10-13T00:57:18.315Z");
+    for (const edit of [{ next_dispatch_at: "soon" }, { next_dispatch_at: null }, { hold: false }]) {
+      const pool = openai(edit);
+      assert.equal(pool?.usedPercent, 80, JSON.stringify(edit));
+      assert.equal(pool?.nextDispatchAt, undefined, JSON.stringify(edit));
     }
   });
 
@@ -94,10 +140,10 @@ describe("parseUsage", () => {
     ["a percent without its reset is dropped", (j) => ({ ...j, windows: [{ ...win, resets_at: "soon" }] }), 1, false],
     ["an absurd percent is dropped", (j) => ({ ...j, windows: [{ ...win, used_percent: 5000 }] }), 1, false],
     ["a newer kind, shown as is", (j) => ({ ...j, windows: [{ ...win, kind: "seven_day_opus" }] }), 1, true],
-    ["markup in a kind", (j) => ({ ...j, windows: [{ ...win, kind: "<b>x</b>" }] }), undefined],
-    ["negative tokens", (j) => ({ ...j, windows: [{ ...win, tokens: { ...tokens, output: -1 } }] }), undefined],
-    ["tokens as text", (j) => ({ ...j, windows: [{ ...win, tokens: { ...tokens, input: "1" } }] }), undefined],
-    ["windows not a list", (j) => ({ ...j, windows: {} }), undefined],
+    ["markup in a kind", (j) => ({ ...j, windows: [{ ...win, kind: "<b>x</b>" }] }), 0],
+    ["negative tokens", (j) => ({ ...j, windows: [{ ...win, tokens: { ...tokens, output: -1 } }] }), 0],
+    ["tokens as text", (j) => ({ ...j, windows: [{ ...win, tokens: { ...tokens, input: "1" } }] }), 0],
+    ["windows not a list", (j) => ({ ...j, windows: {} }), 0],
     ["too many windows", (j) => ({ ...j, windows: Array.from({ length: 9 }, () => win) }), 4, true],
     ["markup in a worker's name", (j) => ({ ...j, workers: [{ name: "<img src=x>", tokens }] }), 1, true, 0],
     ["a worker's absurd tokens", (j) => ({ ...j, workers: [{ name: "w", tokens: { ...tokens, output: Number.MAX_VALUE } }] }), 1, true, 0],
@@ -113,6 +159,75 @@ describe("parseUsage", () => {
   }
   it("needs its marker", () => assert.equal(parseUsage(body(valid()).replace(USAGE_MARKER, "")), undefined));
   it("totals tokens", () => assert.equal(tokenTotal({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }), 10));
+});
+
+describe("runs in the snapshot", () => {
+  const raw = () => fixture<{ runs: Record<string, unknown>[] }>("usage-runs.json");
+  const runs = (edit: Record<string, unknown>) => parseUsage(body({ ...raw(), runs: [{ ...raw().runs[0], ...edit }] }))?.runs;
+  it("reads each run's names and tokens, kind and item optional", () => {
+    const u = parseUsage(body(raw()));
+    assert.equal(u?.runs?.length, 5);
+    assert.deepEqual(u?.runs?.[0], {
+      repository: "jmarrero-forge/review", runId: 19876543210, pool: "claude", kind: "implement", item: "jmarrero-forge/review#99",
+      finishedAt: "2026-10-18T13:30:00Z", requests: 412, tokens: { input: 120000, output: 310000, cacheRead: 41000000, cacheWrite: 2600000 },
+    });
+    assert.deepEqual(u?.runs?.[3], { repository: "jmarrero-forge/agentic-job", runId: 19876543213, pool: "mistral", finishedAt: "2026-10-18T02:00:00Z", tokens: { input: 500000, output: 20000, cacheRead: 0, cacheWrite: 0 } });
+    assert.equal(u?.pools?.claude?.usedPercent, 73, "the pools are read as before");
+  });
+  it("tells no runs list from an empty one", () => {
+    const { runs: _, ...without } = raw();
+    assert.equal(parseUsage(body(without))?.runs, undefined);
+    assert.deepEqual(parseUsage(body({ ...without, runs: [] }))?.runs, []);
+    assert.equal(parseUsage(body({ ...without, runs: {} }))?.runs, undefined);
+  });
+  it("drops a malformed run, not the list", () => {
+    for (const bad of [
+      { repository: "review" }, { repository: "jmarrero-forge/.." }, { repository: "<b>/x" }, { run_id: "19876543210" }, { run_id: 1.5 }, { run_id: 0 }, { pool: "Claude" }, { pool: "<b>" },
+      { finished_at: "yesterday" }, { finished_at: undefined }, { tokens: { input: 1, output: 2, cache_read: 3 } }, { tokens: { input: -1, output: 2, cache_read: 3, cache_write: 4 } },
+    ]) {
+      assert.deepEqual(runs(bad), [], JSON.stringify(bad));
+    }
+    assert.equal(parseUsage(body({ ...raw(), runs: [{ ...raw().runs[0], pool: "<b>" }, raw().runs[1]] }))?.runs?.length, 1);
+  });
+  it("counts a run listed twice once, by repository and run id", () => {
+    const twice = parseUsage(body({ ...raw(), runs: [raw().runs[0], { ...raw().runs[0], kind: "review" }, { ...raw().runs[0], repository: "jmarrero-forge/tracker" }] }))?.runs;
+    assert.deepEqual(twice?.map((r) => [r.repository, r.kind]), [["jmarrero-forge/review", "implement"], ["jmarrero-forge/tracker", "implement"]]);
+  });
+  it("leaves out a kind, item or request count it can't read, keeping the run", () => {
+    for (const edit of [{ kind: "<img src=x>" }, { item: "jmarrero-forge/review" }, { item: "jmarrero-forge/review#0" }, { item: "../x#1" }, { requests: -1 }, { requests: "4" }]) {
+      const [run] = runs(edit) ?? [];
+      assert.ok(run, JSON.stringify(edit));
+      const field = Object.keys(edit)[0] as "kind" | "item" | "requests";
+      assert.equal(run?.[field], undefined, JSON.stringify(edit));
+    }
+  });
+  it(`reads at most ${MAX_RUNS} runs`, () => {
+    const many = Array.from({ length: MAX_RUNS + 20 }, (_, i) => ({ ...raw().runs[0], run_id: i + 1 }));
+    assert.equal(parseUsage(body({ ...raw(), runs: many }))?.runs?.length, MAX_RUNS);
+  });
+});
+
+describe("spendByRun", () => {
+  const now = Date.parse("2026-10-18T14:44:00Z");
+  const all = () => parseUsage(body(fixture("usage-runs.json")))!.runs!;
+  it("keeps the day's runs, largest first, and totals them by kind and repository", () => {
+    const spend = spendByRun(all(), now);
+    assert.deepEqual(spend.runs.map((r) => r.runId), [19876543210, 19876543212, 19876543211, 19876543213], "the run of two days ago is left out");
+    assert.deepEqual(spend.byKind, [
+      { name: "implement", tokens: 44030000, runs: 1 },
+      { name: "review", tokens: 11399000, runs: 2 },
+      { name: UNKNOWN_KIND, tokens: 520000, runs: 1 },
+    ]);
+    assert.deepEqual(spend.byRepository, [
+      { name: "jmarrero-forge/review", tokens: 52300000, runs: 2 },
+      { name: "jmarrero-forge/tracker", tokens: 3129000, runs: 1 },
+      { name: "jmarrero-forge/agentic-job", tokens: 520000, runs: 1 },
+    ]);
+  });
+  it("leaves out a run dated after now, and finds nothing a day later", () => {
+    assert.equal(spendByRun(all(), now - 60 * 60_000).runs.length, 3, "a run that finished after this now is not yet shown");
+    assert.deepEqual(spendByRun(all(), now + 2 * 24 * 60 * 60_000), { runs: [], byKind: [], byRepository: [] });
+  });
 });
 
 describe("loadUsage", () => {

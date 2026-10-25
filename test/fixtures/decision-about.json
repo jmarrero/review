@@ -1,0 +1,11 @@
+{
+  "/repos/example/work/issues/15": { "number": 15, "state": "open", "html_url": "https://github.com/example/work/issues/15" },
+  "/repos/example/work/issues/15/comments?since=2026-10-15T00:00:00.000Z&per_page=100": [
+    { "created_at": "2026-10-14T23:00:00Z", "updated_at": "2026-10-16T08:00:00Z" },
+    { "created_at": "2026-10-17T09:12:00Z", "updated_at": "2026-10-17T09:12:00Z" }
+  ],
+  "/repos/example/actions/issues/86": { "number": 86, "state": "closed", "html_url": "https://github.com/example/actions/pull/86", "pull_request": { "merged_at": null } },
+  "/repos/example/actions/issues/90": { "number": 90, "state": "closed", "html_url": "https://github.com/example/actions/pull/90", "pull_request": { "merged_at": "2026-10-18T10:00:00Z" } },
+  "/repos/example/work/issues/20": { "number": 20, "state": "open", "html_url": "https://github.com/example/work/issues/20" },
+  "/repos/example/work/issues/20/comments?since=2026-10-19T09:30:00.000Z&per_page=100": []
+}

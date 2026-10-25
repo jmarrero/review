@@ -2,13 +2,23 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { fillPeople, homeSkeleton, resetExpanded } from "../src/github/homeview.ts";
 import type { People, PersonAsk } from "../src/github/people.ts";
-import { peopleView } from "../src/github/peopleview.ts";
+import { peopleMeta, peopleView } from "../src/github/peopleview.ts";
 import { installDom } from "./helpers.ts";
 
 installDom();
 afterEach(resetExpanded);
 const row = (n: number, reviewRequested = false): PersonAsk => ({ key: `upstream/widget#${n}`, ref: { owner: "upstream", repo: "widget", number: n }, title: "<script>title</script>", author: "alice", url: `https://github.com/upstream/widget/${reviewRequested ? "pull" : "issues"}/${n}`, action: reviewRequested ? "Review" : "Reply", ci: reviewRequested ? "unknown" : "n/a", notificationIds: [String(n)], reviewRequested });
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+describe("header people count", () => {
+  it("shows a dash, not a stale or never-filled count, while From people is closed", () => {
+    const people: People = { rows: [row(1), row(2)], warnings: [] };
+    assert.deepEqual(peopleMeta(undefined, false), { text: "people —", title: "Open From people to read" });
+    assert.deepEqual(peopleMeta(people, false), { text: "people —", title: "Open From people to read" });
+    assert.equal(peopleMeta(undefined, true).text, "people …");
+    assert.equal(peopleMeta(people, true).text, "people 2");
+  });
+});
 
 describe("From people UI", () => {
   it("sits after Decisions, closed by default, and previews five rows with View all and safe text", () => {
@@ -42,6 +52,13 @@ describe("From people UI", () => {
     assert.equal(changes, 2);
     assert.deepEqual(people.rows.map((r) => r.key), ["upstream/widget#2"]);
     assert.deepEqual(people.rows[0]?.notificationIds, []);
+  });
+
+  it("labels an unlocated mention and still offers Mark done", () => {
+    const people: People = { rows: [{ ...row(1), unlocated: true }], warnings: [] };
+    const el = peopleView(people, Date.now(), { done: async () => {}, changed: () => {} });
+    assert.match(el.textContent ?? "", /alice · mention \(not located\) · CI n\/a/);
+    assert.equal(el.querySelector("button")?.textContent, "Mark done");
   });
 
   it("reports mark-read failures without dismissing the row and retries only unread IDs", async () => {

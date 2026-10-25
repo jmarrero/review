@@ -8,11 +8,12 @@ import type { Recorded, Scripted } from "./helpers.ts";
 const data = JSON.parse(readFileSync(new URL("fixtures/people.json", import.meta.url), "utf8")) as { search: PeopleSubject[]; notifications: PeopleNotification[]; timelines: Record<string, PeopleEvent[]> };
 const now = Date.parse("2026-10-04T00:00:00Z");
 
-function client(options: { notificationsStatus?: number; searchStatus?: number; failedThread?: number; failedTimeline?: number; failedCI?: boolean; truncatedCI?: boolean; notifications?: PeopleNotification[]; paginated?: boolean } = {}) {
+function client(options: { notificationsStatus?: number; searchStatus?: number; failedThread?: number; failedTimeline?: number; failedCI?: boolean; truncatedCI?: boolean; notifications?: PeopleNotification[]; paginated?: boolean; threads?: Record<number, { subject: Partial<PeopleSubject>; timeline: PeopleEvent[] }> } = {}) {
   const calls: Recorded[] = [];
   const route = (method: string, url: string): Scripted | undefined => {
     const path = new URL(url).pathname;
-    if (method === "PATCH") return { status: 204 };
+    // GitHub answers "mark a thread as read" with 205 and no body.
+    if (method === "PATCH") return { status: 205 };
     if (path === "/search/issues") return options.searchStatus ? { status: options.searchStatus } : { body: { items: data.search } };
     if (path === "/notifications") {
       if (options.notificationsStatus) return { status: options.notificationsStatus, body: { message: "notifications denied" } };
@@ -21,11 +22,13 @@ function client(options: { notificationsStatus?: number; searchStatus?: number; 
       return { body: notifications };
     }
     const timeline = /\/issues\/(\d+)\/timeline$/.exec(path);
-    if (timeline) return Number(timeline[1]) === options.failedTimeline ? { status: 403 } : { body: data.timelines[timeline[1]!] ?? [] };
+    if (timeline) return Number(timeline[1]) === options.failedTimeline ? { status: 403 } : { body: options.threads?.[Number(timeline[1])]?.timeline ?? data.timelines[timeline[1]!] ?? [] };
     const issue = /\/issues\/(\d+)$/.exec(path);
     if (issue) {
       const n = Number(issue[1]);
       if (n === options.failedThread) return { status: 404 };
+      const thread = options.threads?.[n];
+      if (thread) return { body: { number: n, title: `Thread ${n}`, ...thread.subject } };
       return { body: data.search.find((s) => s.number === n) ?? { number: n, title: `Thread ${n}`, user: { login: "jmarrero-bot", type: "User" }, ...(n === 12 ? { pull_request: {} } : {}) } };
     }
     if (/\/pulls\/\d+$/.test(path)) return { body: { head: { sha: "abc" } } };
@@ -40,7 +43,7 @@ function client(options: { notificationsStatus?: number; searchStatus?: number; 
     const response = route(method, url);
     assert.ok(response, `unexpected fixture request: ${method} ${url}`);
     const status = response.status ?? 200;
-    return new Response(status === 204 ? null : JSON.stringify(response.body ?? {}), { status, headers: { "content-type": "application/json", ...response.headers } });
+    return new Response(status === 204 || status === 205 ? null : JSON.stringify(response.body ?? {}), { status, headers: { "content-type": "application/json", ...response.headers } });
   });
   return { gh, calls };
 }
@@ -109,6 +112,59 @@ describe("From people loader", () => {
     const { gh } = client({ notifications });
     const people = await loadPeople(gh, now);
     assert.deepEqual(people.rows.map((r) => r.key), ["upstream/widget#1"]);
+  });
+
+  it("repeats the notifications URL between polls so it is revalidated, still filtering by the exact cutoff", async () => {
+    const seen: { url: string; validator: string | null }[] = [];
+    const threads: string[] = [];
+    const base = data.notifications[1]!;
+    const start = Date.parse("2026-10-06T12:00:00Z");
+    // Updated after the floored since= but before the exact 14-day cutoff.
+    const stale = { ...base, updated_at: new Date(start - PEOPLE_RECENT_DAYS * 86_400_000 - 3_600_000).toISOString() };
+    const gh = new GitHub(async () => "fixture-only", async (url, init) => {
+      const path = new URL(url).pathname;
+      if (path === "/notifications") {
+        const validator = new Headers(init?.headers).get("if-none-match");
+        seen.push({ url, validator });
+        if (validator === '"n1"') return new Response(null, { status: 304 });
+        return new Response(JSON.stringify([stale]), { headers: { "content-type": "application/json", etag: '"n1"' } });
+      }
+      if (path !== "/search/issues") threads.push(path);
+      return new Response(JSON.stringify(path === "/search/issues" ? { items: [] } : []), { headers: { "content-type": "application/json" } });
+    });
+    assert.deepEqual((await loadPeople(gh, start)).rows, []);
+    assert.deepEqual((await loadPeople(gh, start + 60_000)).rows, []);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[0]!.url, seen[1]!.url);
+    assert.equal(new URL(seen[0]!.url).searchParams.get("since"), "2026-09-22T00:00:00.000Z");
+    assert.equal(seen[0]!.validator, null);
+    assert.equal(seen[1]!.validator, '"n1"');
+    assert.deepEqual(threads, [], "the extra day since= fetches is dropped by the exact cutoff before any thread read");
+  });
+
+  it("finds mentions in an opening body and inline review comments, and lists unlocated mentions", async () => {
+    const alice = { login: "alice", type: "User" };
+    const bot = { login: "jmarrero-bot", type: "User" };
+    const mention = (n: number): PeopleNotification => ({ ...data.notifications[1]!, id: String(200 + n), subject: { type: "Issue", url: `https://api.github.com/repos/upstream/widget/issues/${n}` } });
+    const threads = {
+      // The mention is in the issue body; the timeline has no event for it.
+      20: { subject: { user: alice, body: "@jmarrero, is this the right approach?", created_at: "2026-10-01T00:00:00Z" }, timeline: [] },
+      // An inline review comment is a line-commented event with comments[].
+      21: { subject: { user: bot, body: "Automated PR", pull_request: {} }, timeline: [{ event: "line-commented", comments: [{ user: alice, body: "@jmarrero see this line", created_at: "2026-10-02T12:00:00Z" }] }] },
+      // Nothing read mentions the operator: listed, not hidden.
+      22: { subject: { user: alice, body: "no mention here" }, timeline: [] },
+      // Located but from a bot, or before the window: still dropped.
+      23: { subject: { user: bot, body: "@jmarrero bot body", created_at: "2026-10-02T00:00:00Z" }, timeline: [] },
+      24: { subject: { user: alice, body: "@jmarrero old body", created_at: "2026-09-01T00:00:00Z" }, timeline: [{ event: "line-commented", comments: [{ user: bot, body: "@jmarrero bot line", created_at: "2026-10-02T00:00:00Z" }] }] },
+    };
+    const { gh } = client({ notifications: [20, 21, 22, 23, 24].map(mention), threads, searchStatus: 500 });
+    const people = await loadPeople(gh, now);
+    assert.deepEqual(people.rows.map((r) => [r.key, r.requestedAt, r.unlocated, r.notificationIds]), [
+      ["upstream/widget#21", "2026-10-02T12:00:00Z", undefined, ["221"]],
+      ["upstream/widget#20", "2026-10-01T00:00:00Z", undefined, ["220"]],
+      ["upstream/widget#22", undefined, true, ["222"]],
+    ]);
+    assert.equal(people.rows[2]?.url, "https://github.com/upstream/widget/issues/22");
   });
 
   it("leaves a truncated CI summary unknown instead of claiming success", async () => {

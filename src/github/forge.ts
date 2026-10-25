@@ -103,6 +103,11 @@ export function parseBotMeta(body: string): BotMeta {
   return meta;
 }
 
+/** Whether a PR is a draft in the forge. */
+export function isForgeDraft(pr: ForgePr): boolean {
+  return pr.draft && pr.ref.owner.toLowerCase() === FORGE_ORG.toLowerCase();
+}
+
 /** The next operator action for an approved fork, until /promote is sent. */
 export function promotionAction(pr: ForgePr, verdict: Verdict | undefined): "promote" | "write" | undefined {
   if (verdict?.state !== "approved" || pr.author !== BOT_LOGIN || pr.ref.owner.toLowerCase() !== FORGE_ORG.toLowerCase()) return undefined;

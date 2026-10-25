@@ -5,12 +5,14 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { Active } from "../src/github/agents.ts";
 import type { Item } from "../src/github/board.ts";
-import { applyLimit, COUNT_CLASS, DECISION_LIMIT, fillAgents, fillFocus, fillStatus, fillNeeds, fillPriority, fillUsage, type Home, type HomeHooks, homeSkeleton, resetExpanded, reveal, setSectionOpen, stepRow, VIEW_ALL_CLASS, walkRows } from "../src/github/homeview.ts";
+import { applyLimit, COUNT_CLASS, DECISION_LIMIT, fillAgents, fillFocus, fillStatus, focusStatus, fillNeeds, fillPriority, fillUsage, type Home, type HomeHooks, homeSkeleton, resetExpanded, reveal, setSectionOpen, stepRow, VIEW_ALL_CLASS, walkRows } from "../src/github/homeview.ts";
 import { buildNeeds } from "../src/github/needs.ts";
 import { buildEntries, type Entry } from "../src/github/queue.ts";
 import { needsSignature } from "../src/github/needsview.ts";
 import { PREVIEW_ROWS, SECTION_TITLE, SECTIONS, type SectionId } from "../src/github/sections.ts";
-import { type MistralAllowance, parseUsage, USAGE_MARKER, type UsageData } from "../src/github/usage.ts";
+import type { RawComment } from "../src/github/heartbeat.ts";
+import { findUsage, type MistralAllowance, parseUsage, USAGE_MARKER, type UsageData } from "../src/github/usage.ts";
+import { time } from "../src/github/view.ts";
 import { createRenderer } from "../src/markdown.ts";
 import { fixture, installDom } from "./helpers.ts";
 
@@ -53,12 +55,58 @@ const needsHooks = (sent: unknown[] = []) => ({
 afterEach(() => resetExpanded());
 
 describe("operator dashboard", () => {
+  it("shows tracker's current snapshot, not an older one left on the issue", () => {
+    const home = homeSkeleton(hooks());
+    const usage = findUsage(fixture<RawComment[]>("usage-snapshot.json"))!;
+    fillUsage(home, { state: "ok", usage }, undefined, Date.parse("2026-10-18T14:44:00Z"));
+    const shown = text(home.slots.weekly);
+    assert.match(shown, /Claude.*73\.0% used.*allows by now: 73\.2%\./);
+    assert.match(shown, /OpenAI.*1\.0% used.*allows by now: 15\.4%\./);
+    assert.doesNotMatch(shown, /held|stale/);
+    assert.match(text(home.slots.weekly.querySelector(".mistral .pool-sum")), /\$41\.25 \/ \$300/);
+    assert.ok(shown.includes(`Published ${time("2026-10-18T14:42:00Z")}.`), shown);
+  });
+
+  it("lists the day's runs under the pools, largest first, with totals by kind and repository", () => {
+    const home = homeSkeleton(hooks());
+    const usage = parseUsage(`${USAGE_MARKER}\n\`\`\`json\n${JSON.stringify(fixture("usage-runs.json"))}\n\`\`\``)!;
+    fillUsage(home, { state: "ok", usage }, undefined, Date.parse("2026-10-18T14:44:00Z"));
+    const spend = home.slots.weekly.querySelector(".spend")!;
+    assert.equal(text(spend.querySelector("h3")), "By run, last day");
+    assert.deepEqual([...spend.querySelectorAll("th")].map((th) => text(th)), ["Pool", "Kind", "Repository", "Item", "Tokens", "Finished"]);
+    const rows = [...spend.querySelectorAll("tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => text(td)));
+    assert.deepEqual(rows.map((r) => r.slice(0, 5)), [
+      ["Claude", "implement", "jmarrero-forge/review", "jmarrero-forge/review#99", "44.0M"],
+      ["Claude", "review", "jmarrero-forge/review", "jmarrero-forge/review#97", "8.3M"],
+      ["OpenAI", "review", "jmarrero-forge/tracker", "jmarrero-forge/tracker#797", "3.1M"],
+      ["Mistral", "unknown", "jmarrero-forge/agentic-job", "—", "520k"],
+    ]);
+    assert.equal(rows[0]?.[5], time("2026-10-18T13:30:00Z"));
+    const links = [...spend.querySelectorAll("tbody tr:first-child a")].map((a) => a.getAttribute("href"));
+    assert.deepEqual(links, ["https://github.com/jmarrero-forge/review/issues/99", "https://github.com/jmarrero-forge/review/actions/runs/19876543210"]);
+    assert.equal(spend.querySelector("tbody td.num")?.getAttribute("title"), "120k input, 310k output, 41.0M cache read, 2.6M cache write, in 412 requests");
+    assert.match(text(spend), /By kind: implement 44\.0M \(1 run\) · review 11\.4M \(2 runs\) · unknown 520k \(1 run\)\./);
+    assert.match(text(spend), /By repository: jmarrero-forge\/review 52\.3M \(2 runs\) · jmarrero-forge\/tracker 3\.1M \(1 run\) · jmarrero-forge\/agentic-job 520k \(1 run\)\./);
+    assert.doesNotMatch(text(spend), /#90/, "the run of two days ago is not shown");
+    assert.match(text(home.slots.weekly), /Claude.*73\.0% used/, "the pool rows stay above it");
+  });
+
+  it("says when the snapshot attributes nothing to runs, and when no run finished in the day", () => {
+    const home = homeSkeleton(hooks());
+    const usage = findUsage(fixture<RawComment[]>("usage-snapshot.json"))!;
+    fillUsage(home, { state: "ok", usage }, undefined, Date.parse("2026-10-18T14:44:00Z"));
+    assert.match(text(home.slots.weekly.querySelector(".spend .fine")), /^Not published: the snapshot carries no runs list/);
+    assert.equal(home.slots.weekly.querySelector(".spend-runs"), null);
+    fillUsage(home, { state: "ok", usage: { ...usage, runs: [] } }, undefined, Date.parse("2026-10-18T14:44:00Z"));
+    assert.match(text(home.slots.weekly.querySelector(".spend")), /No run finished in the last day\./);
+  });
+
   it("reads both published pools, marks held and over-pace usage, and keeps questions open", () => {
     const home = homeSkeleton(hooks());
     const usage = parseUsage(`${USAGE_MARKER}\n\`\`\`json\n${JSON.stringify(fixture("usage-pools.json"))}\n\`\`\``)!;
     fillUsage(home, { state: "ok", usage }, undefined, Date.parse("2026-10-09T14:00:00Z"));
     assert.match(text(home.slots.weekly), /Claude.*42\.0% used with 51\.5% of the week gone, so ~81% by its end at this rate\. The tick is what the scheduler allows by now: 49\.2%\./);
-    assert.match(text(home.slots.weekly), /OpenAI.*80\.0% used with 31\.7% of the week gone.*allows by now: 30\.1% · over pace · held/);
+    assert.match(text(home.slots.weekly), /OpenAI.*80\.0% used with 31\.7% of the week gone.*allows by now: 30\.1% · over pace · new work held until /);
     assert.match(text(home.slots.weekly), /Publication time unknown/);
     assert.match(text(home.slots.weekly.querySelector(".pool-sum.mistral")), /^Mistral 2,500 requests · 1,234,567 tokens since the broker started$/);
     assert.equal(home.slots.weekly.querySelector(".mistral [role=progressbar]"), null, "counters have no bar");
@@ -107,7 +155,7 @@ describe("operator dashboard", () => {
     // pool, its label, over pace or held, [valuenow, valuetext], the fill's width and the tick's x
     const cases = [
       ["claude", "42% used · 52% of week gone · ~81% at reset", false, ["42", "42.0% used, 49.2% allowed by pace"], "42", "48.7129230406746"],
-      ["openai", "80% used · 32% of week gone · ~253% at reset · held", true, ["80", "80.0% used, 30.1% allowed by pace, over pace, held"], "80", "29.60736748511905"],
+      ["openai", `80% used · 32% of week gone · ~253% at reset · new work held until ${time("2026-10-13T00:57:18.315Z")}`, true, ["80", `80.0% used, 30.1% allowed by pace, over pace, new work held until ${time("2026-10-13T00:57:18.315Z")}`], "80", "29.60736748511905"],
     ] as const;
     for (const [name, label, over, aria, fill, tick] of cases) {
       const d = pool(name);
@@ -125,19 +173,30 @@ describe("operator dashboard", () => {
     pool("openai").open = true;
     at("2026-10-10T14:00:00Z");
     assert.deepEqual([pool("claude").open, pool("openai").open], [false, true], "a redraw keeps his expander open");
-    assert.equal(text(pool("claude").querySelector(".pool-label")), "42% used · 52% of week gone · ~81% at reset · stale");
+    assert.equal(text(pool("claude").querySelector(".pool-label")), "42% used · 52% of week gone · ~81% at reset · stale: read 24h 23m ago");
     assert.match(pool("claude").querySelector("[role=progressbar]")!.getAttribute("aria-valuetext")!, /, stale$/);
     assert.match(text(pool("claude").querySelector(".pool-detail")), /Observed .*, 24h 23m ago · stale: the usage publisher has not reported since\.$/);
 
     fillUsage(home, { state: "ok", usage: { ...usage, pools: { claude: { ...usage.pools!.claude!, usedPercent: 130, allowedPercent: 100 } } } }, undefined, Date.parse("2026-10-09T13:50:00Z"));
     const full = pool("claude").querySelector("[role=progressbar]")!;
     assert.deepEqual([attrs(full, "aria-valuenow")[0], attrs(full.querySelector(".fill"), "width")[0], attrs(full.querySelector(".tick"), "x")[0]], ["100", "100", "99"]);
-    assert.match(text(home.slots.weekly.querySelector(".pool-sum.none")), /OpenAI Weekly usage not reported/);
+    assert.match(text(home.slots.weekly.querySelector(".pool-sum.none")), /OpenAI No reading · snapshot age unknown/);
 
     // Two hours into a week: the share gone, but too early to project.
     fillUsage(home, { state: "ok", usage: { ...usage, pools: { openai: { ...usage.pools!.openai!, observedAt: "2026-10-07T10:47:12.000Z", usedPercent: 3 } } } }, undefined, Date.parse("2026-10-07T10:50:00Z"));
-    assert.equal(text(pool("openai").querySelector(".pool-label")), "3% used · 1% of week gone · held");
+    assert.equal(text(pool("openai").querySelector(".pool-label")), `3% used · 1% of week gone · new work held until ${time("2026-10-13T00:57:18.315Z")}`);
     assert.match(text(pool("openai").querySelector(".pool-detail")), /too early to project/);
+  });
+
+  it("keeps Mistral and both missing pool rows with the snapshot age", () => {
+    const home = homeSkeleton(hooks());
+    const usage = parseUsage(`${USAGE_MARKER}\n\`\`\`json\n${JSON.stringify(fixture("usage-null-pools.json"))}\n\`\`\``)!;
+    fillUsage(home, { state: "ok", usage }, undefined, Date.parse("2026-10-18T14:47:00Z"));
+    const rows = [...home.slots.weekly.querySelectorAll(".pool-sum.none")].map(text);
+    assert.deepEqual(rows, ["Claude No reading · snapshot 5m ago.", "OpenAI No reading · snapshot 5m ago.", "Mistral 2,500 requests · 1,234,567 tokens since the broker started"]);
+    assert.match(text(home.slots.weekly), /Mistral/);
+    assert.doesNotMatch(text(home.slots.weekly), /No usage published/);
+    assert.match(text(home.slots.usage), /Mistral/);
   });
 
   it("puts weekly usage first after the summary, and human requests behind an opt-in disclosure after Decisions", () => {
@@ -196,20 +255,45 @@ describe("operator dashboard", () => {
   });
 
   it("puts Decisions before Status and refreshes its age without resetting expansion", () => {
-    // jmarrero-forge runs no Coordinator workflow, so Status is never marked stale.
     const home = homeSkeleton(hooks());
     assert.ok([...home.el.children].indexOf(home.sections.needs.details) < [...home.el.children].indexOf(home.slots.status));
     const status = { body: "First paragraph\n\nSecond paragraph", createdAt: "2026-10-15T10:00:00Z" };
     fillStatus(home, status, render, undefined, Date.parse("2026-10-15T10:30:00Z"));
-    assert.match(text(home.slots.status.querySelector(".status-age")), /As of .*30 min ago/);
+    // The locale's clock, as every other time on the page: 12 or 24 hours as it prefers.
+    const at = new Date("2026-10-15T10:00:00Z").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    assert.equal(text(home.slots.status.querySelector(".status-age")), `As of ${at}, 30 min ago`);
     assert.equal(home.slots.status.querySelector(".status-age.hot"), null);
     home.slots.status.querySelector<HTMLButtonElement>("button")!.click();
     fillStatus(home, status, render, undefined, Date.parse("2026-10-15T11:01:00Z"));
-    assert.match(text(home.slots.status.querySelector(".status-age")), /61 min ago$/);
-    assert.equal(home.slots.status.querySelector(".status-age.hot"), null);
+    assert.match(text(home.slots.status.querySelector(".status-age.hot")), /61 min ago · stale/);
     assert.equal(home.slots.status.querySelector("button")?.getAttribute("aria-expanded"), "true");
     fillStatus(home, { ...status, createdAt: "invalid" }, render);
     assert.match(text(home.slots.status), /Status age unknown/);
+  });
+
+  it("renders a recorded status block without its marker, with full titles from the board", () => {
+    // Recorded from the board on 21 Oct: every title cut to ~25 characters.
+    const status = fixture<{ body: string; createdAt: string }>("project-status.json");
+    const home = homeSkeleton(hooks());
+    const full = "Cross-check ostreedev/ostree's CI against bootc's composefs tests";
+    const board = [
+      tracked("cross", 540, { title: full }),
+      // A board title the cut label does not start with is not the writer's.
+      tracked("other", 405, { title: "A different title" }),
+    ];
+    fillStatus(home, status, render, undefined, Date.parse(status.createdAt), board);
+    const slot = home.slots.status;
+    assert.doesNotMatch(slot.textContent ?? "", /<!--|bot-board-status-v1|-->/);
+    assert.equal(slot.querySelector(".md > p:last-child")?.textContent, "Full board");
+    const link = (n: number) => slot.querySelector(`a[href="${TRACKER}/${n}"]`)?.textContent;
+    assert.equal(link(540), full);
+    assert.equal(link(405), "Epic: Clean up the harness:…");
+    assert.equal(link(528), "Epic: Cut over to the new h…");
+    // Restored on a repaint of an unchanged update too, once the board arrives.
+    const later = homeSkeleton(hooks());
+    fillStatus(later, status, render);
+    fillStatus(later, status, render, undefined, Date.now(), board);
+    assert.equal(later.slots.status.querySelector(`a[href="${TRACKER}/540"]`)?.textContent, full);
   });
 
   it("previews the first paragraph even after a heading or list", () => {
@@ -232,6 +316,46 @@ describe("operator dashboard", () => {
     assert.ok(home.slots.focus.querySelector(".paused"));
   });
 
+  const done = { total: 9, completed: 9, percent_completed: 100 };
+  const half = { total: 4, completed: 2, percent_completed: 50 };
+  const FOCUS_STATUS: { name: string; epic: Partial<Item>; noStatus?: boolean; others?: (epic: Item) => Item[]; text: string; bug: boolean }[] = [
+    { name: "an epic in progress shows its Status", epic: { status: "In Progress", subIssues: half }, text: "In Progress", bug: false },
+    { name: "an unfinished Needs human epic stays Needs human", epic: { status: "Needs human", subIssues: half }, text: "Needs human", bug: false },
+    { name: "an epic without progress shows its Status", epic: { status: "Needs human" }, text: "Needs human", bug: false },
+    { name: "a missing Status is flagged as a board bug", noStatus: true, epic: { subIssues: half }, text: "No Status on the board", bug: true },
+    { name: "a finished Needs human epic is ready to close, open for its Status", epic: { status: "Needs human", subIssues: done }, text: "Ready to close; still open: Status Needs human", bug: false },
+    { name: "a finished 1/1 epic is ready to close", epic: { status: "In Progress", subIssues: { total: 1, completed: 1, percent_completed: 100 } }, text: "Ready to close; still open: Status In Progress", bug: false },
+    { name: "a finished epic without Status is ready to close and flagged", noStatus: true, epic: { subIssues: done }, text: "Ready to close; still open: no Status on the board", bug: true },
+    {
+      name: "a finished epic held open by asks names them, not its Status",
+      epic: { status: "Needs human", subIssues: done },
+      others: (epic) => [
+        tracked("q1", 11, { labels: ["question"], parent: epic.ref! }),
+        tracked("q2", 12, { labels: ["chore"], body: `Blocks: ${epic.url}\n` }),
+        tracked("closed", 13, { labels: ["question"], parent: epic.ref!, state: "closed" }),
+        tracked("elsewhere", 14, { labels: ["question"], body: `Blocks: ${TRACKER}/99\n` }),
+      ],
+      text: "Ready to close; still open: 2 open asks",
+      bug: false,
+    },
+    { name: "one open ask is singular", noStatus: true, epic: { subIssues: done }, others: (epic) => [tracked("q1", 11, { labels: ["question"], body: `Blocks: ${epic.url}\n` })], text: "Ready to close; still open: 1 open ask; no Status on the board", bug: true },
+  ];
+  for (const c of FOCUS_STATUS) {
+    it(`focus: ${c.name}`, () => {
+      const epic = tracked("epic", 1, { labels: ["epic"], ...c.epic });
+      if (c.noStatus) delete epic.status;
+      const board = [epic, ...(c.others?.(epic) ?? [])];
+      assert.deepEqual(focusStatus(epic, board), { text: c.text, bug: c.bug });
+      const home = homeSkeleton(hooks());
+      fillFocus(home, board);
+      const state = home.slots.focus.querySelector(".focus-epic .focus-status")!;
+      assert.equal(text(state), c.text);
+      // Only the bug is styled: a plain .state would paint any Status as an OK pill.
+      assert.equal(state.classList.contains("state"), c.bug);
+      assert.equal(state.classList.contains("bug"), c.bug);
+    });
+  }
+
   it("keeps overflow in collapsed Watching and reveals it for action continuation", () => {
     const home = homeSkeleton(hooks(["needs"]));
     const entries = buildEntries(questions(DECISION_LIMIT + 3).map((q) => ({ ...q, labels: ["escalate"] })), [], new Map());
@@ -241,6 +365,32 @@ describe("operator dashboard", () => {
     const overflow = home.slots.needs.querySelector<HTMLElement>(".watching .need")!;
     reveal(overflow, home.slots.needs, "needs", ".need");
     assert.ok(walkRows(home.el).includes(overflow));
+  });
+
+  it("filters by priority before the limit, so a chip's rows are in the list, not in Watching", () => {
+    const home = homeSkeleton(hooks(["needs"]));
+    // The last three, ranked after the P1s, are past the limit unfiltered.
+    const items = questions(DECISION_LIMIT + 3).map((q, i) => ({ ...q, labels: ["escalate"], priority: i < DECISION_LIMIT ? "P1" : "P2" }));
+    const entries = buildEntries(items, [], new Map());
+    fillNeeds(home, buildNeeds({ entries }), { ...needsHooks(), priority: "P2" }, entries);
+    document.body.replaceChildren(home.el);
+    const shown = () => walkRows(home.el).map((r) => r.getAttribute("data-priority"));
+    const watching = () => text(home.slots.needs.querySelector(".watching summary"));
+    assert.deepEqual(shown(), ["P2", "P2", "P2"]);
+    assert.equal(home.slots.needs.querySelector<HTMLElement>(".needs-none")?.hidden, true);
+    assert.equal(home.slots.needs.querySelector<HTMLElement>(".watching")?.hidden, true);
+    const rows = [...home.slots.needs.querySelectorAll(".need")];
+    const chip = (label: string) => [...home.slots.needs.querySelectorAll<HTMLButtonElement>(".needs-filter button")].find((b) => text(b).startsWith(label))!;
+    chip("All").click();
+    assert.equal(shown().length, DECISION_LIMIT);
+    assert.equal(watching(), "Watching (3)");
+    assert.equal(home.slots.needs.querySelector(".watching .need")?.getAttribute("data-priority"), "P2");
+    chip("P2").click();
+    assert.deepEqual(shown(), ["P2", "P2", "P2"]);
+    assert.equal(home.slots.needs.querySelector(".watching .need"), null);
+    assert.deepEqual(new Set(home.slots.needs.querySelectorAll(".need")), new Set(rows), "the rows are moved, not redrawn");
+    chip("All").click();
+    assert.deepEqual([...home.slots.needs.querySelectorAll(".need")], rows, "back in their order");
   });
 
   it("keeps every open question visible with its blocked item and answer options", () => {

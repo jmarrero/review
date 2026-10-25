@@ -23,6 +23,8 @@ export interface PeopleSubject {
   state?: string;
   pull_request?: unknown;
   head?: { sha: string };
+  body?: string | null;
+  created_at?: string;
 }
 
 export interface PeopleEvent {
@@ -33,6 +35,8 @@ export interface PeopleEvent {
   created_at?: string;
   submitted_at?: string;
   body?: string | null;
+  /** Inline review comments of a `line-commented` event. */
+  comments?: PeopleEvent[];
 }
 
 export interface PeopleNotification {
@@ -55,6 +59,8 @@ export interface PersonAsk {
   ci: CiState | "unknown" | "n/a";
   notificationIds: string[];
   reviewRequested: boolean;
+  /** A mention notification whose mention wasn't found in the text read. */
+  unlocated?: boolean;
   /** In-flight UI action only; never persisted. */
   marking?: boolean;
   markError?: string;
@@ -80,7 +86,24 @@ export function humanAsk(event: PeopleEvent, reason: string): boolean {
   const actor = event.actor ?? event.user;
   if (!isHuman(actor) || actor?.login?.toLowerCase() === OPERATOR.toLowerCase()) return false;
   if (reason === "review_requested") return event.event === "review_requested" && event.requested_reviewer?.login?.toLowerCase() === OPERATOR.toLowerCase();
-  return reason === "mention" && (event.event === "commented" || event.event === "reviewed") && new RegExp(`(^|[^\\w])@${OPERATOR}(?![\\w-])`, "i").test(event.body ?? "");
+  return reason === "mention" && (event.event === "commented" || event.event === "reviewed") && mentionsOperator(event);
+}
+
+function mentionsOperator(event: PeopleEvent): boolean {
+  return new RegExp(`(^|[^\\w])@${OPERATOR}(?![\\w-])`, "i").test(event.body ?? "");
+}
+
+/**
+ * Everything a mention can be written in: the timeline's comments and
+ * reviews, each inline review comment of a `line-commented` event, and the
+ * opening body of the issue or PR, which has no timeline event of its own.
+ * Inline comments and the body are judged as comments by their author.
+ */
+export function mentionSources(subject: PeopleSubject, events: PeopleEvent[]): PeopleEvent[] {
+  const inline = events.flatMap((e) => e.event === "line-commented" ? (e.comments ?? []).map((c): PeopleEvent => ({ ...c, event: "commented" })) : []);
+  const opening: PeopleEvent = { event: "commented", user: subject.user ?? null, body: subject.body ?? null };
+  if (subject.created_at) opening.created_at = subject.created_at;
+  return [...events, ...inline, opening];
 }
 
 function subjectRef(url: string | null): IssueRef | undefined {
@@ -136,7 +159,12 @@ export async function loadPeople(gh: GitHub, now = Date.now(), notifications = t
   };
   const readNotifications = async () => {
     if (!notifications) return;
-    const { data } = await gh.getAll<PeopleNotification>(`/notifications?all=false&participating=true&since=${encodeURIComponent(new Date(cutoff).toISOString())}&per_page=100`);
+    // since= is floored to the UTC day so the URL repeats between polls and
+    // the cached entry is revalidated (a free 304) instead of every poll
+    // being a new, unconditional request and cache entry. The exact cutoff
+    // is applied below; this only fetches up to a day more.
+    const since = Math.floor(cutoff / DAY_MS) * DAY_MS;
+    const { data } = await gh.getAll<PeopleNotification>(`/notifications?all=false&participating=true&since=${encodeURIComponent(new Date(since).toISOString())}&per_page=100`);
     await mapLimit(data, FETCH_CONCURRENCY, async (notification) => {
       if (!notification.unread || !["mention", "review_requested"].includes(notification.reason) || Date.parse(notification.updated_at) < cutoff || Date.parse(notification.updated_at) > now || !Number.isFinite(Date.parse(notification.updated_at))) return;
       if (!["Issue", "PullRequest"].includes(notification.subject.type)) return;
@@ -144,12 +172,20 @@ export async function loadPeople(gh: GitHub, now = Date.now(), notifications = t
       if (!ref || `${ref.owner}/${ref.repo}`.toLowerCase() !== notification.repository.full_name.toLowerCase()) return;
       try {
         const [subject, events] = await Promise.all([gh.get<PeopleSubject>(issuePath(ref)).then((r) => r.data), timeline(ref)]);
-        const ask = events.filter((e) => humanAsk(e, notification.reason) && Date.parse(eventTime(e) ?? "") >= cutoff && Date.parse(eventTime(e) ?? "") <= now).sort((a, b) => (eventTime(b) ?? "").localeCompare(eventTime(a) ?? ""))[0];
-        if (!ask) return;
+        const mention = notification.reason === "mention";
+        const sources = mention ? mentionSources(subject, events) : events;
+        const ask = sources.filter((e) => humanAsk(e, notification.reason) && Date.parse(eventTime(e) ?? "") >= cutoff && Date.parse(eventTime(e) ?? "") <= now).sort((a, b) => (eventTime(b) ?? "").localeCompare(eventTime(a) ?? ""))[0];
+        // A mention found only from a bot, the operator, an unknown actor or
+        // before the window is located and deliberately dropped. One found
+        // nowhere (an edited-away mention, or text this doesn't read) is
+        // still listed, so its unread notification can be marked done.
+        const unlocated = !ask && mention && !sources.some(mentionsOperator);
+        if (!ask && !unlocated) return;
         // Merge after both sources finish: notification access can't erase search.
         const row = makeRow(ref, subject, false);
         if (notification.reason === "review_requested") row.action = "Review";
-        row.requestedAt = eventTime(ask)!;
+        if (ask) row.requestedAt = eventTime(ask)!;
+        else row.unlocated = true;
         row.notificationIds.push(notification.id);
         notificationRows.push(row);
       } catch (e) {
@@ -167,6 +203,7 @@ export async function loadPeople(gh: GitHub, now = Date.now(), notifications = t
     if (!existing) byKey.set(row.key, row);
     else {
       existing.notificationIds = [...new Set([...existing.notificationIds, ...row.notificationIds])];
+      if (!row.unlocated) delete existing.unlocated;
       if (!existing.reviewRequested) {
         if (row.action === "Review") existing.action = "Review";
         if ((row.requestedAt ?? "") > (existing.requestedAt ?? "")) existing.requestedAt = row.requestedAt!;

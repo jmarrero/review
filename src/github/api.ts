@@ -371,7 +371,10 @@ export class GitHub {
     if (!res.ok) throw new GitHubError(res.status, await errorMessage(res, `${method} ${path}`));
     // And again: a GET that raced the write may have cached the old state.
     if (method !== "GET") this.cache.invalidate(staleAfterWrite(url));
-    return (res.status === 204 ? undefined : await res.json()) as T;
+    // Some writes succeed with no body: 204, and 205 from marking a
+    // notification thread read. Parse only what is there.
+    const text = await res.text();
+    return (text === "" ? undefined : JSON.parse(text)) as T;
   }
 
   /** True when the rate budget is below `fraction` of its limit. */

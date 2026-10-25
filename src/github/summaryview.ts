@@ -4,12 +4,14 @@
 // from what the sections already read, so it adds no GitHub request and
 // follows their refresh rules (none while the tab is hidden). The
 // scheduler's line needs the controller's runs, which only the ops
-// detail reads; until it is opened the line offers to open it.
+// detail reads; until it is opened the line says so. Each line says what
+// its state means (new work held until when, a stale reading's age, agents
+// not confirmed running) rather than a bare word to be looked up.
 
 import { h, link } from "../dom.ts";
 import type { ActiveAgent } from "./agents.ts";
 import type { ControllerData, PieceState } from "./controller.ts";
-import { duration, monthGone, poolWords } from "./opsview.ts";
+import { duration, monthGone, poolStateWords, poolWords } from "./opsview.ts";
 import type { PageState } from "./state.ts";
 
 /** Agents linked by name on the line; the rest are counted. */
@@ -43,7 +45,9 @@ function agentsLine(state: PageState, targets: SummaryTargets): HTMLElement {
   if (!s.executionKnown) return (line.append("not read yet"), line);
   const by = new Map<string, number>();
   for (const a of running) by.set(poolOf(a), (by.get(poolOf(a)) ?? 0) + 1);
-  line.append(`${running.length} running`, by.size ? ` (${[...by].map(([pool, n]) => `${pool} ${n}`).join(", ")})` : "", s.unconfirmed ? ` · ${s.unconfirmed} unconfirmed` : "");
+  // Unconfirmed: a board claim or a sighting with no current run or
+  // heartbeat behind it, so not counted as running (see agents.ts).
+  line.append(`${running.length} running`, by.size ? ` (${[...by].map(([pool, n]) => `${pool} ${n}`).join(", ")})` : "", s.unconfirmed ? ` · ${s.unconfirmed} claimed or last seen, not confirmed running` : "");
   running.slice(0, AGENTS_LINKED).forEach((a) => {
     line.append(" · ", link(a.runUrl ?? a.itemUrl, a.itemRef ?? a.name));
   });
@@ -62,18 +66,23 @@ function ago(at: string | undefined, now: number): string {
   return Number.isFinite(t) ? `${duration(Math.max(0, now - t), false)} ago` : "time unknown";
 }
 
-/** The board scheduler's mode (what BOARD_DISPATCH makes it do), the coordinator's and the poll's last passes. */
+/**
+ * The board scheduler's mode (what BOARD_DISPATCH makes it do), the poll's
+ * last pass and the broker probe's last run (it has only a schedule, so
+ * every run is the default branch's). The probe's job runs only
+ * while tracker's BROKER_OUTAGE is apply, so otherwise it reads "skipped".
+ */
 function schedulerLine(controller: ControllerData | undefined, now: number, targets: SummaryTargets): HTMLElement {
   const line = h("li", {}, jump("ops", "Scheduler", targets), " ");
-  if (!controller) return (line.append("open the ops detail to read it"), line);
+  if (!controller) return (line.append("mode and last passes not read: they are read when the ops detail is opened"), line);
   const piece = (label: string): PieceState | undefined => controller.pieces.find((p) => p.piece.label === label);
   const pass = (p: PieceState | undefined) => !p?.last ? "no pass" : p.last.conclusion === "success" ? `ok ${ago(p.last.at, now)}` : `${p.last.conclusion ?? "ended"} ${ago(p.last.at, now)}`;
   const board = piece("Board scheduler");
   const mode = board?.scheduler?.mode;
   line.append(
     `board ${mode === "acting" ? "dispatching" : mode === "preview" ? "previewing (dry run)" : "mode unknown"}`,
-    ` · coordinator ${pass(piece("Coordinator"))}`,
     ` · poll ${pass(piece("Poll"))}`,
+    ` · broker ${pass(piece("Broker probe"))}`,
   );
   return line;
 }
@@ -83,7 +92,11 @@ function resourcesLines(state: PageState, now: number, targets: SummaryTargets):
   if (!usage) return [h("li", {}, jump("weekly-usage", "Resources", targets), !state.usage ? " not read yet" : state.usage.state === "unreadable" ? " unreadable with this token" : " not published")];
   const lines = POOLS.flatMap(([name, label]) => {
     const pool = usage.pools?.[name];
-    return pool ? [h("li", pool.hold ? { class: "hot" } : {}, jump("weekly-usage", label, targets), ` ${poolWords(pool).short}${pool.hold ? " · held" : ""}`)] : [];
+    if (!pool) return [];
+    const { held, stale } = poolStateWords(pool, now);
+    // Over pace as the pool's row has it: used beyond what the scheduler allows by now, held or not yet.
+    const over = pool.usedPercent > pool.allowedPercent ? ` · over pace: ${Math.round(pool.allowedPercent)}% allowed by now` : "";
+    return [h("li", pool.hold || over ? { class: "hot" } : {}, jump("weekly-usage", label, targets), ` ${poolWords(pool).short}${over}${held}${stale}`)];
   });
   const m = usage.mistral;
   if (m?.allowance) lines.push(h("li", {}, jump("weekly-usage", "Mistral", targets), ` $${m.allowance.spentUsd.toFixed(2)}${m.allowance.estimated ? " est." : ""} of $${m.allowance.limitUsd} this month`));

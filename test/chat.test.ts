@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import { AcpClient, TAILNET_STEP, chatPanel, derivedEndpoint, findLiveRuns, type ChatTiming } from "../src/github/chat.ts";
+import { AcpClient, TAILNET_STEP, chatPanel, derivedEndpoint, findLiveRuns, stageText, type ChatTiming, type RunStage } from "../src/github/chat.ts";
 import { CHAT_CONFIG, chatEndpoint, parseChatConfig, type ChatConfig } from "../src/github/chatconfig.ts";
 import { GitHub } from "../src/github/api.ts";
 import { installDom, scriptedFetch } from "./helpers.ts";
@@ -16,7 +16,7 @@ const statusComment = (id: number) => ({
 });
 const published = `wss://agentic-job-${RUN}-1.tailf2eb8.ts.net/`;
 const ATTACH_TIMEOUT = 300;
-const FAST: Partial<ChatTiming> = { pollMs: 1, pollMaxMs: 2, retryMs: 1, startLimitMs: 5_000, appearLimitMs: 5_000, waitLimitMs: 5_000, openTimeoutMs: 1_000, attachTimeoutMs: ATTACH_TIMEOUT };
+const FAST: Partial<ChatTiming> = { pollMs: 1, pollMaxMs: 2, retryMs: 1, retryMaxMs: 2, startLimitMs: 5_000, appearLimitMs: 5_000, waitLimitMs: 5_000, openTimeoutMs: 1_000, attachTimeoutMs: ATTACH_TIMEOUT };
 
 class MockServer extends EventTarget {
   onmessage: ((e: { data: string }) => void) | null = null;
@@ -75,13 +75,19 @@ type Answer = { status: number; body?: unknown };
  * job has since finished, or not listed (no job started yet, or renamed).
  */
 type Joined = "yes" | "no" | "failed" | "left" | "unlisted";
+const TURN_STARTED = "2026-10-22T15:16:57Z";
+const TURN_CLOCK = new Date(TURN_STARTED).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const jobsBody = (joined: Joined) => ({
   jobs: [
     { name: "profile", status: "completed", steps: [{ name: "Set up job", status: "completed", conclusion: "success" }] },
     ...(joined === "unlisted" ? [] : [{
       name: "run / agent",
       status: joined === "left" ? "completed" : "in_progress",
-      steps: [{ name: TAILNET_STEP, status: joined === "no" ? "in_progress" : "completed", conclusion: joined === "no" ? null : joined === "failed" ? "failure" : "success" }],
+      steps: [
+        { name: TAILNET_STEP, status: joined === "no" ? "in_progress" : "completed", conclusion: joined === "no" ? null : joined === "failed" ? "failure" : "success" },
+        // The task's first turn, after which the run serves the session.
+        { name: "Run ./.agentic-job-source/run", status: joined === "yes" ? "in_progress" : "queued", conclusion: null, started_at: joined === "yes" ? TURN_STARTED : null },
+      ],
     }]),
   ],
 });
@@ -113,17 +119,18 @@ function tracker(runs: Run[] = [], comments: { user: { login: string } | null; b
   return { world, calls, gh, dispatches: () => calls.filter((c) => c.method === "POST") };
 }
 
-function mount(gh: GitHub, modes: Mode[] = []) {
+function mount(gh: GitHub, modes: Mode[] = [], timing: Partial<ChatTiming> = {}) {
   const sockets: MockSocket[] = [];
-  const socketFactory = (url: string) => { const s = new MockSocket(url, modes[sockets.length] ?? "ok"); sockets.push(s); return s as unknown as WebSocket; };
-  const panel = chatPanel(gh, { config: live, socketFactory, timing: FAST })!;
+  const opened: number[] = [];
+  const socketFactory = (url: string) => { const s = new MockSocket(url, modes[sockets.length] ?? "ok"); sockets.push(s); opened.push(performance.now()); return s as unknown as WebSocket; };
+  const panel = chatPanel(gh, { config: live, socketFactory, timing: { ...FAST, ...timing } })!;
   const slot = document.createElement("div");
   document.body.append(slot);
   panel.mount(slot);
   const pane = () => slot.querySelector<HTMLElement>(".chat-panel")!;
   const button = (name: RegExp) => [...slot.querySelectorAll("button")].find((b) => name.test(b.textContent ?? ""))!;
   const status = () => slot.querySelector(".chat-status")?.textContent ?? "";
-  return { slot, panel, sockets, pane, button, status, state: () => pane().dataset.state };
+  return { slot, panel, sockets, opened, pane, button, status, state: () => pane().dataset.state };
 }
 
 async function until(what: string, ok: () => boolean, ms = 3_000): Promise<void> {
@@ -154,6 +161,7 @@ it("finds live runs and their endpoints from the publisher, or the agent job's n
     { name: "only completed runs", runs: [run("completed")], want: [] },
     { name: "the wrapper's status comment", runs: [run("in_progress")], comments: [statusComment(RUN)], want: [{ id: RUN, endpoint: published }] },
     { name: "queued, nothing published", runs: [run("queued")], want: [{ id: RUN }] },
+    { name: "held as waiting, published, the jobs don't say", runs: [run("waiting")], comments: [statusComment(RUN)], want: [{ id: RUN, endpoint: published }] },
     { name: "starting statuses count as live", runs: ["waiting", "pending", "requested"].map((s, i) => run(s, i + 1)), want: [{ id: 1 }, { id: 2 }, { id: 3 }] },
     { name: "in progress, nothing published: derived from the attempt", runs: [run("in_progress", RUN, 2)], want: [{ id: RUN, endpoint: `wss://agentic-job-${RUN}-2.tailf2eb8.ts.net/` }] },
     // Its name doesn't resolve yet: dialing it would only teach resolvers that it doesn't exist.
@@ -185,6 +193,46 @@ it("finds live runs and their endpoints from the publisher, or the agent job's n
   const { gh, calls } = tracker([run("queued")], Array.from({ length: 201 }, () => ({ user: null, body: "" })));
   await findLiveRuns(gh, live);
   assert.ok(calls.some((c) => c.url.endsWith("/issues/728/comments?per_page=100&page=3")));
+});
+
+it("says where a live run is from its jobs' steps", async () => {
+  const cases: { status: string; joined: Joined; want: RunStage }[] = [
+    { status: "queued", joined: "unlisted", want: { phase: "queued" } },
+    { status: "in_progress", joined: "unlisted", want: { phase: "preparing" } },
+    { status: "in_progress", joined: "no", want: { phase: "joining" } },
+    { status: "in_progress", joined: "yes", want: { phase: "working", since: TURN_STARTED } },
+    { status: "in_progress", joined: "failed", want: { phase: "left" } },
+    { status: "in_progress", joined: "left", want: { phase: "left" } },
+  ];
+  for (const c of cases) {
+    const { gh, world } = tracker([run(c.status)]);
+    world.joined = c.joined;
+    const [found] = await findLiveRuns(gh, live);
+    assert.deepEqual(found?.stage, c.want, `${c.status} ${c.joined}`);
+  }
+  const working = stageText({ status: "in_progress", stage: { phase: "working", since: TURN_STARTED } });
+  assert.match(working, /the agent is probably still on its first turn/i);
+  assert.ok(working.includes(`since ${TURN_CLOCK}`));
+  assert.doesNotMatch(stageText({ status: "in_progress", stage: { phase: "working" } }), /since/);
+  assert.match(stageText({ status: "queued", stage: { phase: "queued" } }), /queued/);
+  assert.match(stageText({ status: "in_progress", stage: { phase: "joining" } }), /joining the tailnet/);
+});
+
+it("dials once, then backs off while the agent is on its first turn, saying so", async () => {
+  const t = tracker([run("in_progress")], [statusComment(RUN)]);
+  const m = mount(t.gh, ["fail", "fail", "fail", "fail", "ok"], { retryMs: 20, retryMaxMs: 40 });
+  await until("the live run", () => m.button(/Attach/)?.disabled === false);
+  assert.match(m.status(), /still on its first turn/);
+  m.button(/Attach/).click();
+  await until("a failed attempt", () => m.sockets.length === 1 && /retrying in/.test(m.status()));
+  assert.equal(m.state(), "waiting");
+  assert.match(m.status(), /Not served yet .*still on its first turn .*isn't an error/);
+  await until("connected", () => m.state() === "connected");
+  assert.equal(m.sockets.length, 5);
+  // Each wait doubles, up to retryMaxMs (a timer may fire a millisecond early).
+  const gaps = m.opened.slice(1).map((at, i) => at - m.opened[i]!);
+  for (const [i, min] of [20, 40, 40, 40].entries()) assert.ok(gaps[i]! >= min - 2, `gap ${i}: ${gaps[i]} < ${min}`);
+  m.panel.dispose();
 });
 
 it("speaks ACP initialize/new/prompt/cancel and filters notifications", async () => {

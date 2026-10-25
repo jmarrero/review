@@ -16,6 +16,7 @@
 
 import { type RawCheckRun, type Verdict } from "./forge.ts";
 import { BOT_LOGIN, FORGE_ORG, OPERATOR_SIGNOFF } from "./config.ts";
+import { isBot } from "./authors.ts";
 import { FAILED_CONCLUSIONS, parseRunUrl, type RunRef } from "./asks.ts";
 
 /** What he is asked to do on a PR. */
@@ -234,7 +235,7 @@ export interface RawTimed {
 /** Whether the bot commented after `since` (ISO 8601); never without a date. */
 export function botRepliedSince(since: string | undefined, comments: readonly RawTimed[]): boolean {
   if (!since) return false;
-  return comments.some((c) => c.user?.login === BOT_LOGIN && (c.created_at ?? "") > since);
+  return comments.some((c) => isBot(c.user?.login) && (c.created_at ?? "") > since);
 }
 
 /**

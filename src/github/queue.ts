@@ -5,7 +5,7 @@
 // the bot come last, apart. Pure, so tests can check the ranking and
 // what gets merged or dropped.
 
-import { askKind, blockedBy, isAsk, type Item, NO_PRIORITY, PRIORITY_ORDER } from "./board.ts";
+import { askKind, blockedBy, isAsk, type Item, NO_PRIORITY, PRIORITY_ORDER, waitingSince } from "./board.ts";
 import { DRAFT, FORGE_ORG, NEEDS_HUMAN } from "./config.ts";
 import { type ForgePr, parseBotMeta, promotionAction, refKey, type Verdict, waitsOnReviewer } from "./forge.ts";
 import { forgeWait, type PrWait } from "./waiting.ts";
@@ -107,7 +107,8 @@ function itemWhere(item: Item): string {
 /** What buildEntries takes besides the board and the forge. */
 export interface QueueInputs {
   /**
-   * The bot's PRs other than the forge's drafts that are listed, with
+   * The bot's PRs other than the forge's drafts (save those requesting
+   * his review, whose standing this then is) that are listed, with
    * where each stands (see classifyPr): those with something for him, and those
    * waiting on the bot.
    */
@@ -238,7 +239,7 @@ export function buildEntries(
     }
     const e: Entry = { key: `item:${item.nodeId}`, kind, title: item.title, where: itemWhere(item), href: itemHref(item), item };
     if (item.priority) e.priority = item.priority;
-    const since = item.createdAt ?? item.updatedAt;
+    const since = waitingSince(item);
     if (since) e.since = since;
     if (ask && (item.state === "closed" || answered.has(item.nodeId))) e.settled = true;
     out.push(e);

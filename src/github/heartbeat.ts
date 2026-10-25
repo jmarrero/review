@@ -7,7 +7,8 @@
 // pull requests.
 
 import type { GitHub } from "./api.ts";
-import { BOT_LOGIN, HEARTBEAT_ISSUE, HEARTBEAT_STALE_MS, HEARTBEAT_WAKE_GRACE_MS, TRACKER_REPO } from "./config.ts";
+import { isBot } from "./authors.ts";
+import { HEARTBEAT_ISSUE, HEARTBEAT_STALE_MS, HEARTBEAT_WAKE_GRACE_MS, TRACKER_REPO } from "./config.ts";
 
 /** The comment's first line. */
 export const HEARTBEAT_MARKER = "<!-- bot-heartbeat v1 -->";
@@ -51,6 +52,8 @@ export interface RawComment {
   html_url?: string;
   user?: { login?: string } | null;
   body?: string | null;
+  /** GitHub's: when the comment was last edited (its creation, if never). */
+  updated_at?: string;
 }
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -102,7 +105,7 @@ export function parseHeartbeat(body: string | null | undefined): Heartbeat | und
 /** The bot's heartbeat among an issue's comments: the first of its comments that is one. */
 export function findHeartbeat(comments: readonly RawComment[]): Heartbeat | undefined {
   for (const c of comments) {
-    if (c.user?.login !== BOT_LOGIN) continue;
+    if (!isBot(c.user?.login)) continue;
     const hb = parseHeartbeat(c.body);
     if (!hb) continue;
     if (c.html_url) hb.commentUrl = c.html_url;

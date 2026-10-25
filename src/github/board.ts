@@ -3,6 +3,7 @@
 // synthetic payloads.
 
 import { parseBlocks, parseQuestion, type Question, unfencedLines } from "../answer.ts";
+import { isBot } from "./authors.ts";
 import { BOT_LOGIN, CHORE_LABEL, DONE, FEED_FIELD, FIELD, OPERATOR, QUESTION_LABEL, QUEUE_STATUSES, REVIEW_LABEL, TRACKER_REPO, TRIAGE_FIELD } from "./config.ts";
 
 /** The subset of a project field the app uses. */
@@ -120,7 +121,7 @@ export interface Item {
   news?: string;
   /** The Run field: the devspace agent run working on it, a URL. */
   run?: string;
-  /** When the item was added to the board. */
+  /** When its issue or PR was created, else when the item was added to the board. */
   createdAt?: string;
   /** When the board item itself (a field) last changed. */
   movedAt?: string;
@@ -363,6 +364,18 @@ export function isAsk(item: Item): boolean {
   return askKind(item) !== undefined;
 }
 
+/**
+ * Since when an item has waited on him, as far as the API says. An ask
+ * waits from its issue's creation: the bot opens it when it asks. Any
+ * other item may be months older than its move to Needs human or Draft,
+ * and GitHub keeps no field history, so it waits from the board item's
+ * own last change, an upper bound on that move; undefined (age unknown)
+ * without one, never the issue's age.
+ */
+export function waitingSince(item: Item): string | undefined {
+  return isAsk(item) ? item.createdAt ?? item.updatedAt : item.movedAt;
+}
+
 /** A question issue in the tracker, open or closed. */
 export function isQuestion(item: Item): boolean {
   return askKind(item) === "question";
@@ -394,7 +407,6 @@ export interface CommentFacts {
  * order.
  */
 export function answeredPending(comments: readonly CommentFacts[]): boolean {
-  const last = (login: string) => comments.findLastIndex((c) => c.author === login);
-  const mine = last(OPERATOR);
-  return mine >= 0 && mine > last(BOT_LOGIN);
+  const mine = comments.findLastIndex((c) => c.author === OPERATOR);
+  return mine >= 0 && mine > comments.findLastIndex((c) => isBot(c.author));
 }

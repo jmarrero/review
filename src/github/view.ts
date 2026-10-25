@@ -5,6 +5,7 @@ import { type Answer, parseAnswer, parseBlocks, type Question, unfencedLines } f
 import { h, link } from "../dom.ts";
 import type { Renderer } from "../markdown.ts";
 import { commentNote, type ItemAction, parseAskBody } from "./asks.ts";
+import { authorLabel } from "./authors.ts";
 import { ASK_LABELS, askKind, type IssueRef, isAsk, isQuestion, type Item, questionOf, type SubIssueSummary } from "./board.ts";
 import type { Context, RunStatus, SubIssue } from "./backend.ts";
 import { BOARD_URL, OPERATOR } from "./config.ts";
@@ -22,6 +23,11 @@ function refLabel(item: Item): string {
 export function excerpt(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** A time of day, hours and minutes, the locale's way (12 or 24 h): the one format every clock time uses. "" for a bad time. */
+export function clock(ms: number): string {
+  return Number.isFinite(ms) ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
 }
 
 export function time(iso: string | undefined): string {
@@ -46,6 +52,16 @@ export function age(iso: string | undefined, now: number): string {
   const ms = Math.max(0, now - t);
   for (const [unit, suffix] of AGE_UNITS) if (ms >= unit) return `${Math.floor(ms / unit)}${suffix}`;
   return "now";
+}
+
+/**
+ * An age's tooltip. A board item that isn't an ask ages from the board
+ * item's last change (see waitingSince), an upper bound on when it began
+ * to wait, so it says so rather than "waiting since".
+ */
+export function sinceTitle(e: Entry | undefined, since: string | undefined, waiting = "waiting since"): string {
+  if (!since) return "";
+  return e?.kind === "item" ? `board item last changed ${time(since)}` : `${waiting} ${time(since)}`;
 }
 
 export function pill(priority: string | undefined): HTMLElement {
@@ -138,8 +154,24 @@ function row(e: Entry, labelOf: (e: Entry) => RowLabel | undefined, now: number,
       ),
       why ? h("span", { class: "why" }, why) : null,
     ),
-    h("span", { class: "age", title: e.since ? `waiting since ${time(e.since)}` : "" }, age(e.since, now)),
+    h("span", { class: "age", title: sinceTitle(e, e.since), ...(e.since ? { [SINCE_ATTR]: e.since } : {}) }, age(e.since, now)),
   );
+}
+
+/** On an age label the page's ticker moves on (tickAges): the time it counts from. */
+export const SINCE_ATTR = "data-since";
+
+/**
+ * Move every ticking age under `root` to `now`, in place: the queue is
+ * redrawn only when it changes, so without this a row's age sits at the
+ * time of the last change. An age with nothing to count from keeps its
+ * text ("age unknown").
+ */
+export function tickAges(root: ParentNode, now: number): void {
+  for (const el of root.querySelectorAll<HTMLElement>(`.age[${SINCE_ATTR}]`)) {
+    const text = age(el.getAttribute(SINCE_ATTR) ?? undefined, now);
+    if (text) el.textContent = text;
+  }
 }
 
 /** A filter chip: a link to the queue filtered so, with its row count. */
@@ -395,7 +427,7 @@ function commentView(c: Context["comments"][number], render: Renderer, onAsk: "q
   return h(
     "article",
     { class: `comment${isAnswer ? " your-answer" : ""}` },
-    h("div", { class: "meta" }, link(c.url, `${c.author} · ${time(c.createdAt)}`), label),
+    h("div", { class: "meta" }, link(c.url, `${authorLabel(c.author)} · ${time(c.createdAt)}`), label),
     h("div", { class: "md" }, render(c.body)),
   );
 }

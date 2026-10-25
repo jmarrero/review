@@ -72,6 +72,8 @@ describe("parseRoute", () => {
     ["#triage", { route: "home" }],
     ["#decisions", { route: "home" }],
     ["#item/PVTI_abc-_1", { route: "item", id: "PVTI_abc-_1" }],
+    ["#item/I_kwDOP9abcd", { route: "item", id: "I_kwDOP9abcd" }],
+    ["#item/X_abc", { route: "home" }],
     ["#pr/jmarrero-forge/bootc/30", { route: "pr", ref: { owner: "jmarrero-forge", repo: "bootc", number: 30 } }],
     ["#pr/o/r.s_t/1", { route: "pr", ref: { owner: "o", repo: "r.s_t", number: 1 } }],
     ["#pr/o/r/0", { route: "home" }],

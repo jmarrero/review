@@ -2,12 +2,13 @@
 // current-head review requests, approved forks to promote and escalations.
 // The broader legacy queue is kept in Watching and By priority.
 
-import { askProblem, blockedBy, isQuestion, type Item, NO_PRIORITY, PRIORITY_ORDER } from "./board.ts";
+import { askProblem, blockedBy, isQuestion, type Item, NO_PRIORITY, PRIORITY_ORDER, waitingSince } from "./board.ts";
 import { effectivePriority, type Entry, onBot, priorityRank } from "./queue.ts";
 import type { Stop } from "./advance.ts";
 import { type Decision, decisionLabel } from "./triage.ts";
+import { isBot } from "./authors.ts";
 import { OPERATOR } from "./config.ts";
-import { promotionAction, refKey } from "./forge.ts";
+import { isForgeDraft, promotionAction, refKey } from "./forge.ts";
 
 /** The one thing a row asks of him. */
 export type NeedAction = "answer" | "review" | "write" | "promote";
@@ -57,7 +58,9 @@ function actionOf(e: Entry): NeedAction | "none" {
     if (promotion) return promotion;
     if (e.verdict?.state === "approved") return "none";
     if (e.verdict?.state === "promoted" && !(e.wait?.askedAt && e.verdict.at && e.wait.askedAt > e.verdict.at)) return "none";
-    if (e.pr && !e.pr.draft && e.wait?.reasons.includes("review-requested") && !e.wait.reviewedCurrentHead && e.verdict?.state !== "changes-requested") return "review";
+    // A draft upstream isn't ready for review whoever asks; a forge draft is
+    // what he reviews to promote, and the bot requests his review on it.
+    if (e.pr && (!e.pr.draft || isForgeDraft(e.pr)) && e.wait?.reasons.includes("review-requested") && !e.wait.reviewedCurrentHead && e.verdict?.state !== "changes-requested") return "review";
     return "none";
   }
   const item = e.item;
@@ -127,7 +130,8 @@ export function buildNeeds(input: NeedsInput): Need[] {
   }
   const listed = new Set(input.entries.flatMap((e) => [e, ...(e.children ?? [])]).filter((e) => e.kind !== "pr").map((e) => e.item?.nodeId));
   for (const item of board) {
-    if (!listed.has(item.nodeId) && item.labels.includes("escalate") && item.ref) push({ key: `item:${item.nodeId}`, kind: "item", title: item.title, where: refKey(item.ref), href: `#item/${item.nodeId}`, item, ...(item.priority ? { priority: item.priority } : {}), ...(item.createdAt ? { since: item.createdAt } : {}) }, undefined);
+    const since = waitingSince(item);
+    if (!listed.has(item.nodeId) && item.labels.includes("escalate") && item.ref) push({ key: `item:${item.nodeId}`, kind: "item", title: item.title, where: refKey(item.ref), href: `#item/${item.nodeId}`, item, ...(item.priority ? { priority: item.priority } : {}), ...(since ? { since } : {}) }, undefined);
   }
   const questions = new Map(out.concat(done).flatMap((n) => (n.action === "answer" && issueKey(n.entry?.item) ? [[issueKey(n.entry?.item) as string, n] as const] : [])));
   for (const d of input.decisions ?? []) {
@@ -171,6 +175,10 @@ export function buildNeeds(input: NeedsInput): Need[] {
 
 /** How many of the rows still wait on him. */
 export const waitingCount = (needs: readonly Need[]): number => needs.filter((n) => !n.done).length;
+
+/** How many of the rows still waiting on him the bot raised (its PR, issue or decision). */
+export const botWaitingCount = (needs: readonly Need[]): number =>
+  needs.filter((n) => !n.done && isBot(n.entry?.pr?.author ?? n.entry?.item?.author ?? n.decision?.item.author)).length;
 
 /** The rows as a list to step through: answerable questions are answered in place, the rest open. */
 export function needStops(needs: readonly Need[]): Stop[] {

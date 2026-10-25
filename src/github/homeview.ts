@@ -14,7 +14,7 @@ import type { PageState } from "./state.ts";
 import type { Renderer } from "../markdown.ts";
 import type { Active, AgentSummary } from "./agents.ts";
 import { agentsBody, agentsSummary } from "./agentsview.ts";
-import type { Item } from "./board.ts";
+import { blockedBy, type Item } from "./board.ts";
 import { diffBoard, type Snapshot } from "./boardfeed.ts";
 import { type FeedOptions, feedSection } from "./boardfeedview.ts";
 import type { QueueFilter } from "./filter.ts";
@@ -24,7 +24,7 @@ import { newsList } from "./newsview.ts";
 import type { People } from "./people.ts";
 import { peopleView, type PeopleHooks } from "./peopleview.ts";
 import { ALL_PRIORITIES, type Need, waitingCount } from "./needs.ts";
-import { applyPriority, NEED_CLASS, NEED_FILTERED_CLASS, needRow, needsHead, type NeedsHooks } from "./needsview.ts";
+import { applyPriority, NEED_CLASS, NEED_FILTERED_CLASS, NEED_ORDER_ATTR, needRow, needsHead, type NeedsHooks, WATCHING_CLASS, WATCHING_ITEM_CLASS } from "./needsview.ts";
 import { type Ops } from "./ops.ts";
 import { opsDetail, POOL_ATTR, usageSection, usageSummary, weeklyUsage } from "./opsview.ts";
 import { type Entry, priorityRank } from "./queue.ts";
@@ -37,7 +37,7 @@ import type { UsageData } from "./usage.ts";
 import { summaryView } from "./summaryview.ts";
 import type { ControllerData } from "./controller.ts";
 import { triageView, type TriageHooks } from "./triageview.ts";
-import { CAUGHT_UP_CLASS, type ListExtras, priorityList, ROW_CLASS, type RowLabel, rowText } from "./view.ts";
+import { CAUGHT_UP_CLASS, clock, type ListExtras, priorityList, ROW_CLASS, type RowLabel, rowText } from "./view.ts";
 
 /** The class of the page, of a section, and of its count. */
 export const HOME_CLASS = "home";
@@ -47,7 +47,8 @@ export const VIEW_ALL_CLASS = "view-all";
 
 function statusInterval(): number | undefined {
   try {
-    return parseControllerConfig(CONTROLLER).hosted.find((p) => p.label === "Coordinator")?.staleAfterMinutes;
+    // The poll's pass took over the coordinator's (tracker has no coordinator.yml), so its interval.
+    return parseControllerConfig(CONTROLLER).hosted.find((p) => p.label === "Poll")?.staleAfterMinutes;
   } catch {
     // Invalid ops configuration must not prevent the dashboard rendering.
     return undefined;
@@ -292,7 +293,11 @@ export function fillNeeds(home: Home, needs: readonly Need[], hooks: NeedsHooks,
   const waiting = waitingCount(needs);
   const limit = Math.max(DECISION_LIMIT, needs.filter((n) => n.action === "answer" && !n.done).length);
   if (needs.length === 0) slot.replaceChildren(h("p", { class: `empty ${CAUGHT_UP_CLASS}` }, DECISIONS_CONFIG.document ? "No other asks. See the decisions document above." : "All caught up: nothing needs you right now."));
-  else slot.replaceChildren(needsHead(needs, hooks, slot), ...needs.slice(0, limit).map((n) => needRow(n, hooks)));
+  else slot.replaceChildren(needsHead(needs, hooks, slot, limit), ...needs.map((n, i) => {
+    const row = needRow(n, hooks);
+    row.setAttribute(NEED_ORDER_ATTR, String(i));
+    return row;
+  }));
   const keys = new Set(needs.map((n) => n.key));
   const identity = (e: Entry): string => {
     const ref = e.pr?.ref ?? e.item?.ref;
@@ -305,19 +310,36 @@ export function fillNeeds(home: Home, needs: readonly Need[], hooks: NeedsHooks,
     seen.add(key);
     return true;
   });
-  const overflow = needs.slice(limit);
-  if (watching.length || overflow.length) slot.append(h("details", { class: "watching" }, h("summary", {}, `Watching (${watching.length + overflow.length})`), ...overflow.map((n) => needRow(n, hooks)), ...watching.map((e) => {
+  // The rows past the limit, at the priority picked, are moved in by applyPriority, which also counts them in the summary.
+  if (watching.length || needs.length > limit) slot.append(h("details", { class: WATCHING_CLASS }, h("summary", {}), ...watching.map((e) => {
     const label = hooks.labelOf(e);
     const state = e.verdict ? VERDICT_LABEL[e.verdict.state] : label?.text ?? "read";
     const reason = e.wait?.onBot ? ON_BOT_LABEL : e.wait?.reasons.length ? e.wait.reasons.map((r) => REASON_LABEL[r]).join(" · ") : rowText(e) || "No concrete ask; read for context.";
-    return h("p", { class: "watching-item" }, h("a", { href: e.href }, e.title), ` · ${e.where} `, h("span", { class: `state ${label?.cls ?? "read"}` }, state), h("span", { class: "why" }, ` · ${reason}`));
+    return h("p", { class: WATCHING_ITEM_CLASS }, h("a", { href: e.href }, e.title), ` · ${e.where} `, h("span", { class: `state ${label?.cls ?? "read"}` }, state), h("span", { class: "why" }, ` · ${reason}`));
   })));
-  applyPriority(slot, hooks.priority ?? ALL_PRIORITIES);
+  applyPriority(slot, hooks.priority ?? ALL_PRIORITIES, limit);
   setCount(home, "needs", DECISIONS_CONFIG.document ? `document + ${waiting} other asks` : String(waiting), { title: `${waiting} other asks waiting on you`, hot: waiting > 0 });
   return waiting;
 }
 
-export function fillStatus(home: Home, status: ProjectStatus | null | undefined, render: Renderer, error?: string, now = Date.now()): void {
+/**
+ * The status writer cuts each item's title to a fixed length ("Cross-check
+ * ostreedev/ostre…"); a link to a board item gets the item's full title
+ * back, and wraps. Only a cut label the full title starts with is replaced,
+ * so a link the writer labelled otherwise keeps its words. The text after
+ * the link and "+N more" are the writer's and cannot be recovered here.
+ */
+function fullTitles(slot: HTMLElement, board: readonly Item[] | undefined): void {
+  if (!board) return;
+  const titles = new Map(board.flatMap((i) => (i.url ? [[i.url.toLowerCase(), i.title] as const] : [])));
+  for (const a of slot.querySelectorAll("a[href]")) {
+    const title = titles.get(a.getAttribute("href")!.toLowerCase());
+    const cut = /^(.+?)(?:…|\.\.\.)$/s.exec(a.textContent ?? "");
+    if (title && cut && title !== a.textContent && title.startsWith(cut[1]!)) a.textContent = title;
+  }
+}
+
+export function fillStatus(home: Home, status: ProjectStatus | null | undefined, render: Renderer, error?: string, now = Date.now(), board?: readonly Item[]): void {
   const slot = home.slots.status;
   const timestamp = status ? Date.parse(status.createdAt) : NaN;
   const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
@@ -325,13 +347,16 @@ export function fillStatus(home: Home, status: ProjectStatus | null | undefined,
   const age = () => {
     const el = slot.querySelector<HTMLElement>(".status-age");
     if (!el) return;
-    el.textContent = Number.isFinite(timestamp) ? `As of ${new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}, ${minutes} min ago` : "Status age unknown";
+    el.textContent = Number.isFinite(timestamp) ? `As of ${clock(timestamp)}, ${minutes} min ago` : "Status age unknown";
     const stale = interval !== undefined && now - timestamp > interval * 60_000;
     el.classList.toggle("hot", stale);
     if (stale) el.append(" · stale");
   };
   age();
-  if (status && slot.dataset.signature === JSON.stringify(status)) return;
+  if (status && slot.dataset.signature === JSON.stringify(status)) {
+    fullTitles(slot, board);
+    return;
+  }
   slot.dataset.signature = JSON.stringify(status) ?? "";
   slot.replaceChildren(h("h2", {}, "Status"));
   if (!status) {
@@ -349,7 +374,30 @@ export function fillStatus(home: Home, status: ProjectStatus | null | undefined,
     button.textContent = open ? "Collapse" : "Expand";
   });
   slot.append(h("p", { class: "note status-age" }), body, button);
+  fullTitles(slot, board);
   age();
+}
+
+/**
+ * What Focus says of an epic in place of its raw Status. Once every
+ * sub-issue is closed the epic is ready to close, whatever its Status
+ * (often a stale Needs human), so say that and why it is still open: the
+ * open asks blocking it, else its Status. A missing Status is not a
+ * status but a board bug, flagged as one.
+ */
+export function focusStatus(epic: Item, board: readonly Item[]): { text: string; bug: boolean } {
+  const bug = !epic.status;
+  const status = epic.status ? `Status ${epic.status}` : "no Status on the board";
+  const s = epic.subIssues;
+  if (!s || s.total === 0 || s.completed < s.total) return { text: epic.status ?? "No Status on the board", bug };
+  const key = epic.ref ? refKey(epic.ref).toLowerCase() : undefined;
+  const blocks = (i: Item) => {
+    const ref = blockedBy(i);
+    return ref !== undefined && refKey(ref).toLowerCase() === key;
+  };
+  const asks = key ? board.filter((i) => i.state === "open" && blocks(i)).length : 0;
+  const why = asks ? `${asks} open ask${asks === 1 ? "" : "s"}${bug ? `; ${status}` : ""}` : status;
+  return { text: `Ready to close; still open: ${why}`, bug };
 }
 
 /** Active epics, with GitHub's progress and their running child work. */
@@ -364,7 +412,8 @@ export function fillFocus(home: Home, board: readonly Item[] | undefined): void 
   const epics = board.filter((i) => live(i) && (i.labels.includes("epic") || i.subIssues) && i.status !== "Todo" && i.status !== "Draft").sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority) || a.title.localeCompare(b.title));
   for (const epic of epics) {
     const paused = epic.status === "Paused" || epic.verdict?.toLowerCase() === "park";
-    const row = h("article", { class: `focus-epic${paused ? " paused" : ""}` }, h("h3", {}, epic.priority ? `${epic.priority} · ` : "", h("a", { href: epic.url ?? "#" }, epic.title)), h("p", {}, epic.subIssues ? `${epic.subIssues.completed}/${epic.subIssues.total} complete` : "Progress not reported", ` · ${epic.status ?? "No status"}`));
+    const status = focusStatus(epic, board);
+    const row = h("article", { class: `focus-epic${paused ? " paused" : ""}` }, h("h3", {}, epic.priority ? `${epic.priority} · ` : "", h("a", { href: epic.url ?? "#" }, epic.title)), h("p", {}, epic.subIssues ? `${epic.subIssues.completed}/${epic.subIssues.total} complete` : "Progress not reported", " · ", h("span", { class: `focus-status${status.bug ? " state bug" : ""}` }, status.text)));
     if (epic.subIssues) row.append(h("progress", { max: String(epic.subIssues.total), value: String(epic.subIssues.completed), "aria-label": `${epic.title} progress` }));
     const children = board.filter((i) => live(i) && i.status === "In Progress" && i.parent && epic.ref && refKey(i.parent).toLowerCase() === refKey(epic.ref).toLowerCase());
     row.append(h("ul", {}, ...children.map((i) => h("li", {}, h("a", { href: i.url ?? "#" }, i.title), i.lead ? ` · ${i.lead}` : "", " · running"))));

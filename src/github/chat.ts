@@ -51,6 +51,21 @@ export interface LiveRun {
   /** The run's page on github.com. */
   url: string;
   endpoint?: string;
+  /** Where the run is, from its jobs' steps, for the status line. */
+  stage: RunStage;
+}
+
+/**
+ * queued: the run hasn't started (any live status but in_progress). preparing: no job lists the tailnet step
+ * yet. joining: the agent job is joining the tailnet. working: it has
+ * joined, and `since` is when its current step started: the task's first
+ * turn, after which the run serves the session (agentic-job serves it only
+ * then, and says so only in the job summary, which has no API). left: the
+ * agent job has finished or failed to join.
+ */
+export interface RunStage {
+  phase: "queued" | "preparing" | "joining" | "working" | "left";
+  since?: string;
 }
 
 export interface ChatTiming {
@@ -61,9 +76,16 @@ export interface ChatTiming {
   startLimitMs: number;
   /** Give up on a dispatch whose run hasn't shown up after this long. */
   appearLimitMs: number;
-  /** Between connection attempts once the endpoint is known. */
+  /**
+   * First wait between connection attempts once the endpoint is known; it
+   * doubles to retryMaxMs. The endpoint resolves when the agent job joins
+   * the tailnet, but is served only after the task's first turn, which can
+   * take many minutes: dialing every few seconds meanwhile only filled the
+   * browser's console with refused connections.
+   */
   retryMs: number;
-  /** Give up connecting after this long. */
+  retryMaxMs: number;
+  /** Give up connecting after this long: longer than a first turn. */
   waitLimitMs: number;
   /** One connection attempt's limit, until the socket opens. */
   openTimeoutMs: number;
@@ -80,7 +102,8 @@ export const CHAT_TIMING: ChatTiming = {
   startLimitMs: 20 * 60_000,
   appearLimitMs: 2 * 60_000,
   retryMs: 5_000,
-  waitLimitMs: 5 * 60_000,
+  retryMaxMs: 60_000,
+  waitLimitMs: 30 * 60_000,
   openTimeoutMs: 15_000,
   attachTimeoutMs: 120_000,
 };
@@ -114,19 +137,43 @@ function publishedEndpoint(comments: readonly { body: string; user: { login: str
  */
 export const TAILNET_STEP = "Join the tailnet";
 
+type RawStep = { name: string; status: string; conclusion: string | null; started_at?: string | null };
+
 /**
- * Whether a run's agent job is on the tailnet: yes once the step has
- * succeeded and until the job finishes, no before then (or if it failed) or
- * after, and unknown when no job lists the step, as before its job starts
- * or if the step is renamed.
+ * Where an in-progress run's agent job is: on the tailnet (working) once the
+ * step has succeeded and until the job finishes, joining before then, left
+ * if it failed or after, and preparing when no job lists the step, as
+ * before its job starts or if the step is renamed.
  */
-async function joinedTailnet(gh: GitHub, base: string, id: number): Promise<boolean | undefined> {
-  const res = await gh.get<{ jobs?: { status: string; steps?: { name: string; status: string; conclusion: string | null }[] }[] }>(
-    `${base}/actions/runs/${id}/jobs?per_page=100`);
+async function runStage(gh: GitHub, base: string, id: number): Promise<RunStage> {
+  const res = await gh.get<{ jobs?: { status: string; steps?: RawStep[] }[] }>(`${base}/actions/runs/${id}/jobs?per_page=100`);
   const jobs = (res.data.jobs ?? []).filter((j) => j.steps?.some((s) => s.name === TAILNET_STEP));
-  if (!jobs.length) return undefined;
-  return jobs.some((j) => j.status !== "completed"
-    && j.steps!.some((s) => s.name === TAILNET_STEP && s.status === "completed" && s.conclusion === "success"));
+  if (!jobs.length) return { phase: "preparing" };
+  const stages = jobs.filter((j) => j.status !== "completed").map((j): RunStage => {
+    const at = j.steps!.findIndex((s) => s.name === TAILNET_STEP);
+    const step = j.steps![at]!;
+    if (step.status !== "completed") return { phase: "joining" };
+    if (step.conclusion !== "success") return { phase: "left" };
+    const since = j.steps!.slice(at + 1).find((s) => s.status === "in_progress")?.started_at;
+    return { phase: "working", ...(typeof since === "string" && !Number.isNaN(Date.parse(since)) ? { since } : {}) };
+  });
+  return stages.find((s) => s.phase === "working") ?? stages.find((s) => s.phase === "joining") ?? { phase: "left" };
+}
+
+/** HH:MM, local time. */
+const clock = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/** What a live run is doing, from its jobs' steps, in a sentence. */
+export function stageText(run: Pick<LiveRun, "stage" | "status">): string {
+  const s = run.stage;
+  switch (s.phase) {
+    case "queued": return `The run is ${run.status.replace("_", " ")}.`;
+    case "preparing": return "The run is preparing its agent job.";
+    case "joining": return "The agent job is joining the tailnet.";
+    case "left": return "The agent job isn't on the tailnet.";
+    // The steps can't tell the first turn from serving afterwards: hedged.
+    case "working": return `The agent is probably still on its first turn${s.since ? ` (agent step since ${clock(s.since)})` : ""}: the run serves the session only once that turn ends, so this isn't an error. If it has served, check your tailnet login.`;
+  }
 }
 
 /**
@@ -149,11 +196,13 @@ export async function findLiveRuns(gh: GitHub, config: ChatConfig, sources: read
     for (const run of found) {
       const url = `https://github.com/${source.repo}/actions/runs/${run.id}`;
       const attempt = Number.isSafeInteger(run.run_attempt) && run.run_attempt! > 0 ? run.run_attempt! : 1;
-      const joined = await joinedTailnet(gh, base, run.id);
+      const listed = await runStage(gh, base, run.id);
+      // A run held as waiting or pending may still have its agent job up.
+      const stage: RunStage = listed.phase === "preparing" && run.status !== "in_progress" ? { phase: "queued" } : listed;
       const named = publishedEndpoint(comments.data, source, url, config.tailnetDomain);
-      const endpoint = joined === true ? named ?? derivedEndpoint(run.id, attempt, config.tailnetDomain)
-        : joined === undefined ? named : undefined;
-      live.push({ source, id: run.id, attempt, status: run.status, title: String(run.display_title ?? ""), url, ...(endpoint ? { endpoint } : {}) });
+      const endpoint = stage.phase === "working" ? named ?? derivedEndpoint(run.id, attempt, config.tailnetDomain)
+        : stage.phase === "preparing" || stage.phase === "queued" ? named : undefined;
+      live.push({ source, id: run.id, attempt, status: run.status, title: String(run.display_title ?? ""), url, stage, ...(endpoint ? { endpoint } : {}) });
     }
   }
   return live;
@@ -292,6 +341,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
     let timer: ReturnType<typeof setTimeout> | undefined;
     let deadline = 0;
     let delay = t.pollMs;
+    let retryDelay = t.retryMs;
     let busy = false;
     /** A prompt was refused because a turn is running: Cancel turn stays offered. */
     let refused = false;
@@ -374,7 +424,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
         if (gen !== generation || disposed) return;
         run = found;
         if (!found) go(state === "ended" ? "ended" : "none", state === "ended" ? status.textContent ?? "" : "No session is running. Start one to talk to it.");
-        else go(found.endpoint ? "waiting" : "starting", `A session run is ${found.status.replace("_", " ")}. Attach to talk to it; while attached, leaving or disconnecting ends it.`);
+        else go(found.endpoint ? "waiting" : "starting", `A session run is ${found.status.replace("_", " ")}. ${found.stage.phase === "queued" ? "" : `${stageText(found)} `}Attach to talk to it; while attached, leaving or disconnecting ends it.`);
       } catch (e) { if (gen === generation) say(message(e)); }
       finally { if (gen === generation) { working = false; controls(); } }
     };
@@ -401,7 +451,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
       if (found) {
         run = found;
         if (found.endpoint) { wait(gen); return; }
-        say(`Run ${found.status.replace("_", " ")}; waiting for its session endpoint…`);
+        say(`${stageText(found)} Not connecting yet: waiting for its session endpoint…`);
       }
       if (Date.now() > deadline || (!run && dispatched && Date.now() > dispatched.at + t.appearLimitMs)) {
         armed = false; dispatched = undefined;
@@ -419,9 +469,9 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
       schedule(() => void poll(gen), delay);
     };
 
-    /** waiting: connect, retrying every retryMs for at most waitLimitMs. */
+    /** waiting: connect, retrying after retryMs, doubling to retryMaxMs, for at most waitLimitMs. */
     const wait = (gen: number) => {
-      deadline = Date.now() + t.waitLimitMs;
+      deadline = Date.now() + t.waitLimitMs; retryDelay = t.retryMs;
       go("waiting", "Connecting to the session…");
       connect(gen);
     };
@@ -433,7 +483,9 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
         go("waiting", `Couldn't attach: ${why}. Check your tailnet login, then Attach to try again.`);
         return;
       }
-      say(`Not reachable yet (${why}); retrying. The bridge and its certificate can take a few minutes.`);
+      const ms = retryDelay;
+      retryDelay = Math.min(t.retryMaxMs, retryDelay * 2);
+      say(`Not served yet (${why}); retrying in ${Math.ceil(ms / 1000)} s. ${run ? stageText(run) : ""}`.trim());
       schedule(async () => {
         if (gen !== generation || disposed) return;
         try {
@@ -444,7 +496,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
           if (!found.endpoint) { startPolling(gen, "Waiting for the session endpoint…"); return; }
         } catch { /* GitHub being unreachable doesn't stop the attempt. */ }
         if (gen === generation && !disposed) connect(gen);
-      }, t.retryMs);
+      }, ms);
     };
 
     const connect = (gen: number) => {
@@ -501,7 +553,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
         if (gen !== generation || disposed) return;
         run = found;
         if (found?.endpoint) wait(gen);
-        else if (found) startPolling(gen, `Run ${found.status.replace("_", " ")}; waiting for its session endpoint…`);
+        else if (found) startPolling(gen, `${stageText(found)} Not connecting yet: waiting for its session endpoint…`);
         else {
           const src = source();
           const id = await dispatchSession(gh, src);

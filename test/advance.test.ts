@@ -6,9 +6,11 @@ import {
   decisionStops,
   EDITED_ATTR,
   overlayVerdicts,
+  overlayWaiting,
   type PendingVerdict,
   pickNext,
   queueStops,
+  stillReviewed,
   type Stop,
   triageStops,
   writingElsewhere,
@@ -16,7 +18,7 @@ import {
 import { parseItem } from "../src/github/board.ts";
 import { parseDecision } from "../src/github/triage.ts";
 import { OPTIMISTIC_TTL_MS } from "../src/github/config.ts";
-import type { VerdictEntry } from "../src/github/prs.ts";
+import type { VerdictEntry, WaitingPr } from "../src/github/prs.ts";
 import type { Entry } from "../src/github/queue.ts";
 import { installDom, rawBoardItem } from "./helpers.ts";
 
@@ -167,6 +169,42 @@ describe("overlayVerdicts", () => {
   });
 });
 
+describe("overlayWaiting", () => {
+  const T = 1_000_000;
+  const waiting = (n: number, head = "h1"): WaitingPr => ({
+    pr: { ref: { owner: "o", repo: "r", number: n }, url: `https://github.com/o/r/pull/${n}`, title: `#${n}`, body: "", author: "bot", createdAt: "", updatedAt: "", draft: false },
+    head,
+    wait: { reasons: ["review-requested"], onBot: false },
+  });
+  const pending = (state: PendingVerdict["state"]) => new Map([["o/r#1", { state, head: "h1", at: T }]]);
+  // [name, the read, his review, now, reasons left (undefined: not listed)]
+  const cases: [string, WaitingPr, PendingVerdict["state"], number, string[] | undefined][] = [
+    ["drops a PR he approved that a lagging read still lists", waiting(1), "approved", T + 1000, undefined],
+    ["keeps one he asked changes on, on the bot", waiting(1), "changes-requested", T + 1000, []],
+    ["lets the read win after the time limit", waiting(1), "approved", T + OPTIMISTIC_TTL_MS + 1, ["review-requested"]],
+    ["lets the read win once the head moved", waiting(1, "h2"), "approved", T + 1000, ["review-requested"]],
+    ["leaves any other verdict to the read", waiting(1), "promoted", T + 1000, ["review-requested"]],
+    ["leaves other PRs as read", waiting(2), "approved", T + 1000, ["review-requested"]],
+    // The read has his change request, and lists the PR for the bot's reply since.
+    ["lets the read win once it shows his verdict", { ...waiting(1), verdict: { state: "changes-requested" } }, "changes-requested", T + 1000, ["review-requested"]],
+  ];
+  for (const [name, w, state, now, reasons] of cases) {
+    it(name, () => {
+      const got = overlayWaiting([w], pending(state), now);
+      assert.deepEqual(got[0]?.wait.reasons, reasons);
+    });
+  }
+
+  it("puts a PR he asked changes on on the bot", () => {
+    assert.equal(overlayWaiting([waiting(1)], pending("changes-requested"), T + 1000)[0]?.wait.onBot, true);
+  });
+
+  // A requested forge draft is listed here, and the queue takes this verdict over overlayVerdicts'.
+  it("shows his change request as the verdict before a read does", () => {
+    assert.deepEqual(overlayWaiting([{ ...waiting(1), verdict: { state: "none" } }], pending("changes-requested"), T + 1000)[0]?.verdict, { state: "changes-requested" });
+  });
+});
+
 describe("triageStops and decisionStops", () => {
   const item = (n: number) => parseItem(rawBoardItem(n, { Status: "Needs human" }));
   const entry = (n: number, over: Partial<Entry> = {}): Entry => ({ key: `item:PVTI_t${n}`, kind: "item", title: `item ${n}`, where: "w", href: `#item/PVTI_t${n}`, ...over });
@@ -202,5 +240,20 @@ describe("triageStops and decisionStops", () => {
       ["decision:PVTI_t9", "#decisions", "D9: pick", true],
     ]);
     assert.equal(pickNext(got, "decision:PVTI_t7", got)?.key, "decision:PVTI_t9");
+  });
+});
+
+describe("stillReviewed", () => {
+  const reviewed = new Map([["o/r#1", "aaa"], ["o/r#2", "bbb"], ["o/r#3", "ccc"]]);
+  const reads: Record<string, (string | undefined)[]> = {
+    // A push since his review: the bot sent it back to him.
+    "o/r#1": ["aaa", "zzz"],
+    // Still the head he reviewed, or not read yet.
+    "o/r#2": ["bbb", undefined],
+  };
+
+  it("drops a mark once any read shows another head, keeps it while none does", () => {
+    const got = stillReviewed(reviewed, (key) => reads[key] ?? []);
+    assert.deepEqual([...got], [["o/r#2", "bbb"], ["o/r#3", "ccc"]]);
   });
 });

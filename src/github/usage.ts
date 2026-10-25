@@ -2,13 +2,15 @@
 // Claude Code's /usage: per window, the percent used and reset time its
 // status line last reported, and the tokens its transcripts spent; plus
 // tokens per worker and for the coordinator's own session.
-// bin/bot-heartbeat in homegit keeps it in one comment by the bot on
+// bin/bot-heartbeat in homegit kept it, and tracker's usage.yml now keeps
+// its pools (with windows: []), in one comment by the bot on
 // USAGE_REPO#USAGE_ISSUE, a private repository, so it is read with the
 // viewer's token, and a token that can't read it just gets no panel.
 // The comment is parsed strictly, like the heartbeat.
 
 import { GitHubError, type GitHub, RateLimited } from "./api.ts";
-import { BOT_LOGIN, USAGE_ISSUE, USAGE_REPO } from "./config.ts";
+import { isBot } from "./authors.ts";
+import { USAGE_ISSUE, USAGE_REPO } from "./config.ts";
 import type { RawComment } from "./heartbeat.ts";
 import config from "./usage-config.json" with { type: "json" };
 
@@ -40,6 +42,18 @@ const MAX_USD = 1e9;
 /** Mistral models priced or counted; more are dropped. */
 const MAX_MODELS = 32;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+/**
+ * Runs read from a snapshot; the rest are dropped. A day's runs are a few
+ * dozen, and the comment itself is capped at 32 KiB by the publisher.
+ */
+export const MAX_RUNS = 200;
+/** A pool's name in a run: claude, openai, mistral, or a newer one. */
+const POOL_RE = /^[a-z][a-z0-9_-]{0,23}$/;
+/** OWNER/REPO#N, as the heartbeat's workers name their items. */
+const ITEM_RE = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9]\d{0,9})$/;
+/** An Actions run id is a positive integer; GitHub's are far below this. */
+const MAX_RUN_ID = Number.MAX_SAFE_INTEGER;
+const DAY_MS = 24 * 60 * 60_000;
 
 export interface Tokens {
   input: number;
@@ -67,7 +81,10 @@ export interface UsagePool {
   allowedPercent: number;
   resetsAt: string;
   observedAt: string;
+  /** True when the scheduler dispatches no new work on this pool; running work goes on. */
   hold: boolean;
+  /** When the scheduler said it would dispatch on this pool again (next_dispatch_at), for a held pool that gave one. */
+  nextDispatchAt?: string;
   /** The window's length; a week when the snapshot doesn't say. */
   windowMinutes: number;
 }
@@ -139,6 +156,32 @@ export interface MistralBudget {
   url?: string;
 }
 
+/**
+ * What one agent run spent, as the snapshot's `runs` list carries it: the
+ * broker's per-run usage record (praxis-run-usage/v2: the repository and
+ * run id from the job's OIDC token, requests and tokens) with the pool
+ * its models name and, from the dispatch, the job's kind and its item.
+ * Nothing the browser can reach writes this yet: the broker serves the
+ * record only to the run holding its token (GET /v1/runs/self), and its
+ * /usage endpoint, which the publisher copies, lists no runs. Until the
+ * publisher gathers them, `usage.runs` is undefined and the section says
+ * so (see README, "Weekly subscription usage").
+ */
+export interface RunUsage {
+  /** OWNER/REPO the run ran in. */
+  repository: string;
+  runId: number;
+  /** claude, openai or mistral: the provider the run's requests went to. */
+  pool: string;
+  /** implement, review, ...: what the dispatcher started; missing for a run it didn't name. */
+  kind?: string;
+  /** OWNER/REPO#N the run worked on. */
+  item?: string;
+  finishedAt: string;
+  requests?: number;
+  tokens: Tokens;
+}
+
 export interface Usage {
   updatedAt: string;
   /** When the status line last reported the percents. */
@@ -151,6 +194,8 @@ export interface Usage {
   commentUrl?: string;
   pools?: Partial<Record<"claude" | "openai", UsagePool>>;
   mistral?: MistralUsage;
+  /** The runs the snapshot attributes spend to; undefined when it carries no `runs` list at all. */
+  runs?: RunUsage[];
 }
 
 /** What the ops view knows of the usage: the snapshot, none published yet, or a repository this token can't read. */
@@ -201,7 +246,11 @@ function parsePool(raw: unknown): UsagePool | undefined {
   if (usedPercent === undefined || allowedPercent === undefined || !resetsAt || !observedAt || typeof raw.hold !== "boolean") return undefined;
   // A year at most: past that the "window" is no plan's.
   const minutes = count(raw.window_minutes, 366 * 24 * 60);
-  return { usedPercent, allowedPercent, resetsAt, observedAt, hold: raw.hold, windowMinutes: minutes && minutes >= 1 ? minutes : WEEK_MINUTES };
+  const pool: UsagePool = { usedPercent, allowedPercent, resetsAt, observedAt, hold: raw.hold, windowMinutes: minutes && minutes >= 1 ? minutes : WEEK_MINUTES };
+  // Only a held pool waits for it; a bad or missing time leaves the hold without an end.
+  const next = raw.hold ? time(raw.next_dispatch_at) : undefined;
+  if (next) pool.nextDispatchAt = next;
+  return pool;
 }
 
 /**
@@ -248,6 +297,79 @@ export function parseAllowance(raw: unknown): MistralAllowance | undefined {
   return { limitUsd, resetsAt, spentUsd, estimated: true, unpriced, lowerBound: unpriced.length > 0 || dropped > 0 };
 }
 
+/** Whether any "/"-separated part of a path is only dots. */
+const dotted = (path: string): boolean => path.split("/").some((part) => /^\.+$/.test(part));
+
+/**
+ * One entry of the snapshot's `runs`: {repository, run_id, pool,
+ * finished_at, tokens} with kind, item and requests optional. Anything
+ * malformed drops the entry, not the list: a run that can't be named
+ * can't be linked, and its tokens would be attributed to nothing.
+ */
+function parseRun(raw: unknown): RunUsage | undefined {
+  if (!isObject(raw)) return undefined;
+  const repository = str(raw.repository, REPO_RE);
+  const runId = count(raw.run_id, MAX_RUN_ID);
+  const pool = str(raw.pool, POOL_RE);
+  const finishedAt = time(raw.finished_at);
+  const tokens = parseTokens(raw.tokens);
+  // Both names become link paths: no "." or ".." parts (REPO_RE's characters allow them).
+  if (!repository || dotted(repository) || !runId || !Number.isInteger(runId) || !pool || !finishedAt || !tokens) return undefined;
+  const run: RunUsage = { repository, runId, pool, finishedAt, tokens };
+  const kind = str(raw.kind, NAME_RE);
+  if (kind) run.kind = kind;
+  const item = str(raw.item, ITEM_RE);
+  if (item && !dotted(item.slice(0, item.indexOf("#")))) run.item = item;
+  const requests = count(raw.requests, MAX_TOKENS);
+  if (requests !== undefined) run.requests = requests;
+  return run;
+}
+
+/** A total by one name of a run's, largest first. */
+export interface SpendTotal {
+  name: string;
+  tokens: number;
+  runs: number;
+}
+
+/** The last day's runs, largest first, and their totals by kind and by repository. */
+export interface Spend {
+  runs: RunUsage[];
+  byKind: SpendTotal[];
+  byRepository: SpendTotal[];
+}
+
+/** Runs the snapshot can't name a kind for are totalled under this. */
+export const UNKNOWN_KIND = "unknown";
+
+function totals(runs: readonly RunUsage[], nameOf: (r: RunUsage) => string): SpendTotal[] {
+  const by = new Map<string, SpendTotal>();
+  for (const r of runs) {
+    const name = nameOf(r);
+    const t = by.get(name) ?? { name, tokens: 0, runs: 0 };
+    t.tokens += tokenTotal(r.tokens);
+    t.runs++;
+    by.set(name, t);
+  }
+  return [...by.values()].sort((a, b) => b.tokens - a.tokens || a.name.localeCompare(b.name));
+}
+
+/**
+ * Where the spend went: the runs that finished in the day before `now`
+ * (a run dated after it is a clock's error, left out), largest first,
+ * with a total per kind and per repository. The snapshot's runs are the
+ * publisher's selection; this only narrows them to the day shown.
+ */
+export function spendByRun(runs: readonly RunUsage[], now: number): Spend {
+  const day = runs
+    .filter((r) => {
+      const at = Date.parse(r.finishedAt);
+      return at > now - DAY_MS && at <= now;
+    })
+    .sort((a, b) => tokenTotal(b.tokens) - tokenTotal(a.tokens) || b.finishedAt.localeCompare(a.finishedAt));
+  return { runs: day, byKind: totals(day, (r) => r.kind ?? UNKNOWN_KIND), byRepository: totals(day, (r) => r.repository) };
+}
+
 function parseMistral(raw: unknown): MistralUsage | undefined {
   if (!isObject(raw)) return undefined;
   const requests = count(raw.requests, MAX_TOKENS);
@@ -275,8 +397,10 @@ export function parseUsage(body: string | null | undefined): Usage | undefined {
     if (pool) pools[name] = pool;
   }
   const updatedAt = time(raw.updated_at);
+  const observedAt = time(raw.observed_at);
+  const mistral = parseMistral(raw.mistral);
   const windows = (Array.isArray(raw.windows) ? raw.windows.slice(0, MAX_WINDOWS) : []).flatMap((w) => parseWindow(w) ?? []);
-  if (!Object.keys(pools).length && (!updatedAt || !windows.length)) return undefined;
+  if (!Object.keys(pools).length && !mistral && !updatedAt && !observedAt) return undefined;
   const workers = (Array.isArray(raw.workers) ? raw.workers.slice(0, MAX_WORKERS) : []).flatMap((w) => {
     const name = isObject(w) ? str(w.name, NAME_RE) : undefined;
     const tokens = isObject(w) ? parseTokens(w.tokens) : undefined;
@@ -284,26 +408,50 @@ export function parseUsage(body: string | null | undefined): Usage | undefined {
   });
   // A pool-only publication need not carry a publication timestamp.
   const usage: Usage = { updatedAt: updatedAt ?? "", windows, workers };
-  if (Object.keys(pools).length) usage.pools = pools;
-  const mistral = parseMistral(raw.mistral);
+  // Empty pools are intentional after a restart/reset, not a legacy window publication.
+  if (Object.keys(pools).length || !windows.length) usage.pools = pools;
   if (mistral) usage.mistral = mistral;
-  const observedAt = time(raw.observed_at);
   if (observedAt) usage.observedAt = observedAt;
   const coordinatorTokens = parseTokens(raw.coordinator_tokens);
   if (coordinatorTokens) usage.coordinatorTokens = coordinatorTokens;
+  // A list, even empty, says the publisher attributes runs; none says it
+  // doesn't yet. A run listed twice (gathered from two places) counts once.
+  if (Array.isArray(raw.runs)) {
+    const seen = new Set<string>();
+    usage.runs = raw.runs.slice(0, MAX_RUNS).flatMap((r) => {
+      const run = parseRun(r);
+      const key = run && `${run.repository}/${run.runId}`;
+      if (!run || !key || seen.has(key)) return [];
+      seen.add(key);
+      return [run];
+    });
+  }
   return usage;
 }
 
-/** The bot's usage comment among an issue's comments. */
+/**
+ * The bot's usage comment among an issue's comments: the one edited
+ * last. tracker's usage.yml edits one comment in place, but older
+ * snapshots stay on the issue, listed oldest first, so the first one
+ * that parses can be days stale. An edited comment is dated by GitHub's
+ * updated_at, which the publisher can't leave behind; the JSON's own
+ * updated_at only when the comment has none.
+ */
 export function findUsage(comments: readonly RawComment[]): Usage | undefined {
+  let found: Usage | undefined;
+  let foundAt = -Infinity;
   for (const c of comments) {
-    if (c.user?.login !== BOT_LOGIN) continue;
+    if (!isBot(c.user?.login)) continue;
     const usage = parseUsage(c.body);
     if (!usage) continue;
+    const edited = time(c.updated_at);
+    if (edited) usage.updatedAt = edited;
     if (c.html_url) usage.commentUrl = c.html_url;
-    return usage;
+    // Undated comes before any date; between equals, the later in the list.
+    const at = usage.updatedAt ? Date.parse(usage.updatedAt) : -Infinity;
+    if (!found || at >= foundAt) [found, foundAt] = [usage, at];
   }
-  return undefined;
+  return found;
 }
 
 export const usagePath = `/repos/${USAGE_REPO}/issues/${USAGE_ISSUE}/comments?per_page=100`;

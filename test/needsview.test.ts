@@ -8,7 +8,8 @@ import { type Item } from "../src/github/board.ts";
 import { ALL_PRIORITIES, buildNeeds, filterNeeds, type Need, priorityChips } from "../src/github/needs.ts";
 import { applyPriority, NEED_FILTERED_CLASS, NEEDS_CHANGED_NOTE, needId, type NeedsForm, type NeedsHooks, needRow, needsHead, needsRedraw, needsSignature } from "../src/github/needsview.ts";
 import { loadNeedsPriority, saveNeedsPriority } from "../src/github/store.ts";
-import { buildEntries } from "../src/github/queue.ts";
+import type { ForgePr } from "../src/github/forge.ts";
+import { buildEntries, type Entry } from "../src/github/queue.ts";
 import { parseDecision } from "../src/github/triage.ts";
 import { createRenderer } from "../src/markdown.ts";
 import { installDom } from "./helpers.ts";
@@ -71,30 +72,33 @@ describe("needsRedraw", () => {
 });
 
 describe("needsSignature", () => {
-  it("tracks the exact rendered age label and defers an age-only change under a draft", () => {
-    const since = "2026-02-01T00:00:00Z";
+  it("keeps the ask time, not the age label, so an age tick neither redraws nor claims a change", () => {
+    const since = "2026-02-01T10:00:00Z";
     const entry = first([tracked("PVTI_q", 21, { labels: ["question"], body: BODY })]);
     // The concrete ask's age takes precedence over the PR/item creation age.
     const n: Need = { ...entry, since, entry: { ...entry.entry!, since: "2026-01-01T00:00:00Z" } };
-    const before = { ...hooks(), now: Date.parse(since) + 59_999 };
-    const after = { ...before, now: before.now + 1 };
+    const before = { ...hooks(), now: Date.parse(since) + 10 * 60_000 };
+    const after = { ...before, now: before.now + 60_000 };
+    assert.equal(needRow(n, before).querySelector(".age")?.textContent, "10m");
+    assert.equal(needRow(n, after).querySelector(".age")?.textContent, "11m");
     const previousSignature = needsSignature([n], before);
     const signature = needsSignature([n], after);
-    assert.equal(needRow(n, before).querySelector(".age")?.textContent, "now");
-    assert.equal(needRow(n, after).querySelector(".age")?.textContent, "1m");
-    assert.equal(JSON.parse(previousSignature)[1][0].at(-1), "now");
-    assert.equal(JSON.parse(signature)[1][0].at(-1), "1m");
-    assert.notEqual(signature, previousSignature);
-    assert.equal(needsSignature([n], { ...after, now: after.now + 1 }), signature);
-    assert.deepEqual(needsRedraw({ signature, previousSignature, forms: [{ sent: false, text: "draft", picked: false }], note: undefined, force: false }), { action: "defer", note: NEEDS_CHANGED_NOTE });
+    assert.equal(JSON.parse(signature)[1][0].at(-1), since);
+    assert.equal(signature, previousSignature);
+    const forms = [{ sent: false, text: "half an answer", picked: false }];
+    assert.deepEqual(needsRedraw({ signature, previousSignature, forms, note: undefined, force: false }), { action: "skip", note: undefined });
+    // A new ask time is a change, and is still held back under a draft.
+    const later = needsSignature([{ ...n, since: "2026-02-01T10:05:00Z" }], after);
+    assert.notEqual(later, previousSignature);
+    assert.deepEqual(needsRedraw({ signature: later, previousSignature, forms, note: undefined, force: false }), { action: "defer", note: NEEDS_CHANGED_NOTE });
   });
 
-  it("uses the need's age for a decision without an entry", () => {
+  it("uses the need's ask time for a decision without an entry", () => {
     const d = parseDecision(tracked("I_7", 7, { title: "D3: Promote?", body: BODY, labels: ["question", "decision"], createdAt: "2026-01-31T00:00:00Z" }));
     const needs = buildNeeds({ entries: [], decisions: [d] });
     const view = hooks();
     assert.equal(needRow(needs[0]!, view).querySelector(".age")?.textContent, "1d");
-    assert.equal(JSON.parse(needsSignature(needs, view))[1][0].at(-1), "1d");
+    assert.equal(JSON.parse(needsSignature(needs, view))[1][0].at(-1), "2026-01-31T00:00:00Z");
   });
 });
 
@@ -324,5 +328,47 @@ describe("the bar over the rows", () => {
       if (before) Object.defineProperty(globalThis, "localStorage", before);
       else delete g.localStorage;
     }
+  });
+});
+
+describe("needRow location", () => {
+  const upstreamPr: ForgePr = {
+    ref: { owner: "upstream", repo: "widget", number: 2500 }, url: "https://github.com/upstream/widget/pull/2500", title: "Fix the widget", body: "",
+    author: "jmarrero-bot", createdAt: "2026-01-10T00:00:00Z", updatedAt: "2026-01-11T00:00:00Z", draft: false,
+  };
+  const reviewEntry = (item: Item | undefined): Entry => ({
+    key: "pr:upstream/widget#2500", kind: "pr", pr: upstreamPr, title: upstreamPr.title, where: "upstream/widget#2500", href: "#pr/upstream/widget/2500",
+    wait: { reasons: ["review-requested"], onBot: false }, ...(item ? { item } : {}),
+  });
+  const tag = (e: Entry) => needRow(buildNeeds({ entries: [e] })[0]!, hooks()).querySelector(".tag")!;
+  const links = (el: Element) => [...el.querySelectorAll("a")].map((a) => [text(a), a.getAttribute("href")]);
+
+  it("links a PR row to the PR, and its tracking issue as a labelled second link", () => {
+    const el = tag(reviewEntry(tracked("PVTI_t", 123, { org: "upstream" })));
+    assert.deepEqual(links(el), [["upstream/widget#2500", upstreamPr.url], ["tracker#123", `${TRACKER}/123`]]);
+    assert.match(text(el), /^upstream\/widget#2500 · tracks tracker#123 · age unknown$/);
+    // A board Org other than the PR's owner is still shown.
+    assert.match(text(tag(reviewEntry(tracked("PVTI_t", 123, { org: "containers" })))), /^upstream\/widget#2500 · tracks tracker#123 · containers · /);
+  });
+
+  it("keeps the issue as the location of an escalation row", () => {
+    const el = needRow(first([tracked("PVTI_e", 31, { labels: ["escalate"], org: "containers" })]), hooks()).querySelector(".tag")!;
+    assert.deepEqual(links(el), [["tracker#31", `${TRACKER}/31`]]);
+    assert.match(text(el), /^tracker#31 · containers · /);
+  });
+
+  it("does not repeat the PR when its board item is the PR itself", () => {
+    const el = tag(reviewEntry(tracked("PVTI_s", 1, { kind: "pr", url: upstreamPr.url.toUpperCase() })));
+    assert.deepEqual(links(el), [["upstream/widget#2500", upstreamPr.url]]);
+  });
+
+  it("links a PR row without a board item to the PR", () => {
+    assert.deepEqual(links(tag(reviewEntry(undefined))), [["upstream/widget#2500", upstreamPr.url]]);
+  });
+
+  it("keeps the issue as the location of a question row", () => {
+    const el = needRow(first([tracked("PVTI_q", 21, { labels: ["question"], body: BODY, org: "jmarrero-bot" })]), hooks()).querySelector(".tag")!;
+    assert.deepEqual(links(el), [["tracker#21", `${TRACKER}/21`]]);
+    assert.match(text(el), /^tracker#21 · jmarrero-bot · /);
   });
 });

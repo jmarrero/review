@@ -124,6 +124,27 @@ describe("rendering", () => {
     it(name, () => assert.equal(html(source), want));
   }
 
+  it("hides HTML comments, as GitHub does, but not in code or when unclosed", () => {
+    assert.equal(html("before <!-- hidden *x* [y](https://e.example) --> after\n\n<!-- marker: abc -->"), "<p>before  after</p>\n");
+    assert.equal(html("- a <!--\nb --> c"), "<ul>\n<li>a  c</li>\n</ul>\n");
+    assert.equal(html("`<!-- shown -->`"), "<p><code>&lt;!-- shown --&gt;</code></p>\n");
+    assert.equal(html("```\n<!-- shown -->\n```"), "<pre><code>&lt;!-- shown --&gt;\n</code></pre>\n");
+    assert.equal(html("a <!-- open"), "<p>a &lt;!-- open</p>\n");
+    assert.equal(html("a <!--> b <!---> c -->"), "<p>a  b  c --&gt;</p>\n");
+  });
+
+  it("hides only the comments themselves after a [ that is not a link", () => {
+    // markdown-it scans past the [ for a label, then steps back and scans again.
+    assert.equal(html("[a <!-- x --> visible <!-- y --> tail"), "<p>[a  visible  tail</p>\n");
+    assert.equal(html("[a <!-- x --> b <!-- c"), "<p>[a  b &lt;!-- c</p>\n");
+  });
+
+  it("hides comments in linear time over many unclosed openers", { timeout: 2000 }, () => {
+    assert.match(dom("<!--".repeat(MAX_SOURCE_CHARS / 4)).textContent ?? "", /^<!--/);
+    assert.match(dom("[<!--".repeat(MAX_SOURCE_CHARS / 5)).textContent ?? "", /^\[<!--/);
+    assert.equal(dom(`${"<!--".repeat(MAX_SOURCE_CHARS / 8)}-->x`).textContent?.trim(), "x");
+  });
+
   it("cuts very long sources", () => {
     const root = dom("x".repeat(MAX_SOURCE_CHARS + 10));
     assert.match(root.textContent ?? "", /cut: too long/);

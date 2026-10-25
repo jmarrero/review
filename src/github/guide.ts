@@ -11,7 +11,7 @@
 // should be ordinary review comments by the bot, walked from the review
 // threads, instead of JSON in a marker.
 
-import { BOT_LOGIN } from "./config.ts";
+import { isBot } from "./authors.ts";
 import type { RawReview } from "./forge.ts";
 import type { IssueRef } from "./board.ts";
 
@@ -182,7 +182,7 @@ export type GuideState =
  */
 export function findGuide(reviews: readonly RawReview[], ref: IssueRef, head: string): GuideState {
   const candidates = reviews
-    .filter((r) => r.user?.login === BOT_LOGIN && r.state === "COMMENTED" && (r.body ?? "").includes(MARKER_START))
+    .filter((r) => isBot(r.user?.login) && r.state === "COMMENTED" && (r.body ?? "").includes(MARKER_START))
     .sort((a, b) => ((a.submitted_at ?? "") < (b.submitted_at ?? "") ? -1 : (a.submitted_at ?? "") > (b.submitted_at ?? "") ? 1 : 0));
   const last = candidates.at(-1);
   if (!last) return { state: "none" };

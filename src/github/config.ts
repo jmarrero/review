@@ -35,6 +35,16 @@ export const LINKED_STATUSES: readonly string[] = [IN_REVIEW];
 export const FORGE_ORG = "jmarrero-forge";
 /** The bot's login: the forge PRs listed are the ones it opened. */
 export const BOT_LOGIN = "jmarrero-bot";
+/**
+ * The role apps the bot also writes as (cgwalters-forge/tracker#766), by
+ * bot login (`SLUG[bot]`) with the role shown next to what each wrote.
+ * Their comments and reviews count as the bot's (see authors.ts); BOT_LOGIN
+ * alone still means the user account: its events, the PRs it opens. Empty
+ * until the apps exist. An entry is trusted as much as BOT_LOGIN, so list
+ * only apps the forge installed: a login ending in [bot] names one app,
+ * but anyone can create an app and comment as it.
+ */
+export const ROLE_APPS: readonly { login: string; role: string }[] = [];
 
 /** Board fields the app reads, by name; their ids are looked up at runtime. */
 export const FIELD = {
@@ -168,7 +178,7 @@ export const RECENT_COMMENTS = 5;
 export const NEWS_REPOS: readonly string[] = [
   "jmarrero-forge/homegit",
   "bootc-dev/jmarrero-devspace-sandbox",
-  "jmarrero-forge/review",
+  "jmarrero/review",
   "jmarrero-forge/tracker",
   "jmarrero/atomic-setup",
 ];

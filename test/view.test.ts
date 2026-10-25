@@ -11,7 +11,8 @@ import { type Item, queueItems } from "../src/github/board.ts";
 import type { Context, RunStatus } from "../src/github/backend.ts";
 import { createRenderer } from "../src/markdown.ts";
 import { buildEntries, type Entry } from "../src/github/queue.ts";
-import { age, answerState, type AnswerState, contextView, FILTERS_FOLDED_CLASS, type ItemViewHandlers, itemView, priorityList, STALE_NOTE_CLASS, STATE_LABEL } from "../src/github/view.ts";
+import { age, answerState, type AnswerState, contextView, FILTERS_FOLDED_CLASS, type ItemViewHandlers, itemView, priorityList, sinceTitle, STALE_NOTE_CLASS, STATE_LABEL, tickAges } from "../src/github/view.ts";
+import { h } from "../src/dom.ts";
 import { installDom, rawItems } from "./helpers.ts";
 
 const win = installDom();
@@ -221,6 +222,26 @@ describe("age", () => {
     ["2026-01-16T00:00:00Z", "now"],
   ];
   for (const [iso, want] of cases) it(String(iso), () => assert.equal(age(iso, now), want));
+});
+
+describe("tickAges", () => {
+  it("moves the By priority rows' ages on with the Needs rows', without a redraw", () => {
+    const since = "2026-01-15T11:00:00Z";
+    const row: Entry = { key: "k", kind: "question", title: "t", where: "w", href: "#k", priority: "P1", since };
+    const root = h("div", {}, priorityList([row], () => undefined, Date.parse("2026-01-15T11:30:00Z")), h("span", { class: "age", "data-since": since }, "30m"), h("span", { class: "age", "data-since": "not a date" }, "age unknown"));
+    const ages = () => [...root.querySelectorAll(".age")].map((e) => e.textContent);
+    assert.deepEqual(ages(), ["30m", "30m", "age unknown"]);
+    tickAges(root, Date.parse("2026-01-15T14:00:00Z"));
+    assert.deepEqual(ages(), ["3h", "3h", "age unknown"]);
+  });
+});
+
+describe("sinceTitle", () => {
+  const at = "2026-01-15T12:00:00Z";
+  const entry = (kind: Entry["kind"]): Entry => ({ key: "k", kind, title: "t", where: "w", href: "#" });
+  it("calls a board item's date its last change, not a wait", () => assert.match(sinceTitle(entry("item"), at), /^board item last changed /));
+  it("keeps an ask's wait", () => assert.match(sinceTitle(entry("question"), at, "asked"), /^asked /));
+  it("is empty without a date", () => assert.equal(sinceTitle(entry("item"), undefined), ""));
 });
 
 describe("itemView", () => {

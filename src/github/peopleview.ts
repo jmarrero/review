@@ -7,6 +7,17 @@ export interface PeopleHooks {
   changed(): void;
 }
 
+/**
+ * The header's people count. It is only read while From people is open
+ * (the read costs a search, timelines and notifications), so while it is
+ * closed a count would be either missing or a stale copy; show a dash
+ * instead. When it was last read is in the freshness line ("people").
+ */
+export function peopleMeta(people: People | undefined, open: boolean): { text: string; title: string } {
+  if (!open) return { text: "people —", title: "Open From people to read" };
+  return { text: `people ${people ? people.rows.length : "…"}`, title: people ? "Human asks" : "Reading human asks" };
+}
+
 export function peopleView(people: People | undefined, now: number, hooks: PeopleHooks): HTMLElement {
   const el = h("div", { class: "people-list" });
   if (!people) return h("p", { class: "note" }, "Reading human review requests and notifications…");
@@ -16,7 +27,7 @@ export function peopleView(people: People | undefined, now: number, hooks: Peopl
     const status = h("span", { role: "status", class: "note" }, row.markError ?? "");
     const article = h("article", { class: "people-row" },
       h("a", { href: row.url }, `${row.ref.owner}/${row.ref.repo}#${row.ref.number} ${row.title}`),
-      h("span", { class: "tag" }, ` · ${row.author} · request ${row.requestedAt ? age(row.requestedAt, now) : "age unknown"} · CI ${row.ci}`),
+      h("span", { class: "tag" }, ` · ${row.author} · ${row.unlocated ? "mention (not located)" : `request ${row.requestedAt ? age(row.requestedAt, now) : "age unknown"}`} · CI ${row.ci}`),
       h("a", { href: `${row.url}${row.action === "Review" ? "/files" : "#issuecomment-new"}`, class: "action" }, row.action), status,
     );
     if (row.notificationIds.length) {

@@ -7,11 +7,12 @@
 
 import { OPTIMISTIC_TTL_MS } from "./config.ts";
 import { applyFilter, type QueueFilter } from "./filter.ts";
-import type { Verdict, VerdictState } from "./forge.ts";
+import { refKey, type Verdict, type VerdictState } from "./forge.ts";
 import type { Item } from "./board.ts";
-import type { VerdictEntry } from "./prs.ts";
+import type { VerdictEntry, WaitingPr } from "./prs.ts";
 import { type Entry, onBot } from "./queue.ts";
 import { type Decision, decisionLabel } from "./triage.ts";
+import { afterReview } from "./waiting.ts";
 
 /** One row of a list he steps through. */
 export interface Stop {
@@ -186,4 +187,42 @@ export function overlayVerdicts(
     verdicts.set(key, { ...r?.verdict, state: p.state });
   }
   return { verdicts, pending: still };
+}
+
+/**
+ * The same for the PRs listed for what waits on him (a forge draft only
+ * when his review is requested on it): his reviews from this tab applied
+ * to their waits (see afterReview) and verdicts, so a read that predates
+ * a review, or lags it, doesn't list the PR again. The verdict too: the
+ * queue takes it over overlayVerdicts' for a forge draft listed here. A review stops applying as
+ * overlayVerdicts' do: after `ttl`, once the head moved, or once a read
+ * shows its verdict, so what came after it (a bot's reply) shows.
+ */
+export function overlayWaiting(
+  read: readonly WaitingPr[],
+  pending: ReadonlyMap<string, PendingVerdict>,
+  now: number,
+  ttl: number = OPTIMISTIC_TTL_MS,
+): WaitingPr[] {
+  return read.flatMap((w) => {
+    const p = pending.get(refKey(w.pr.ref));
+    if (!p || now - p.at > ttl || p.head !== w.head || w.verdict?.state === p.state) return [w];
+    if (p.state !== "approved" && p.state !== "changes-requested") return [w];
+    const wait = afterReview(w.wait, p.state);
+    return wait ? [{ ...w, wait, verdict: { ...w.verdict, state: p.state } }] : [];
+  });
+}
+
+/**
+ * The PRs still "reviewed from here" (refKey → the head he reviewed):
+ * a mark is dropped once any read (`heads` gives each source's head for
+ * a key) shows the PR at another head, so a push the bot sends him back
+ * for reads as his to review again rather than answered, with no TTL:
+ * the tab stays open all day and the mark holds as long as the head does.
+ */
+export function stillReviewed(
+  reviewed: ReadonlyMap<string, string>,
+  heads: (key: string) => readonly (string | undefined)[],
+): Map<string, string> {
+  return new Map([...reviewed].filter(([key, head]) => heads(key).every((h) => !h || h === head)));
 }

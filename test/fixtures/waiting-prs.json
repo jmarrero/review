@@ -435,6 +435,39 @@
    }
   },
   "/repos/jmarrero-forge/workflow-compiler/pulls/15/reviews?per_page=100": [],
-  "/repos/jmarrero-forge/workflow-compiler/issues/15/comments?per_page=100": []
+  "/repos/jmarrero-forge/workflow-compiler/issues/15/comments?per_page=100": [],
+  "/repos/jmarrero-forge/bootc/pulls/16": {
+   "number": 16,
+   "html_url": "https://github.com/jmarrero-forge/bootc/pull/16",
+   "state": "open",
+   "draft": true,
+   "mergeable_state": "clean",
+   "requested_reviewers": [
+    {
+     "login": "jmarrero"
+    }
+   ],
+   "user": {
+    "login": "jmarrero-bot"
+   },
+   "head": {
+    "sha": "1616161616161616161616161616161616161616",
+    "ref": "bot/x16"
+   },
+   "base": {
+    "ref": "main"
+   }
+  },
+  "/repos/jmarrero-forge/bootc/pulls/16/reviews?per_page=100": [],
+  "/repos/jmarrero-forge/bootc/issues/16/comments?per_page=100": [],
+  "/repos/jmarrero-forge/bootc/issues/16/timeline?per_page=100": [
+   {
+    "event": "review_requested",
+    "created_at": "2026-10-03T00:00:00Z",
+    "requested_reviewer": {
+     "login": "jmarrero"
+    }
+   }
+  ]
  }
 }

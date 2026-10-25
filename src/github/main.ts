@@ -33,9 +33,11 @@ import {
   EDITED_ATTR,
   type Origin,
   overlayVerdicts,
+  overlayWaiting,
   type PendingVerdict,
   pickNext,
   queueStops,
+  stillReviewed,
   triageStops,
   writingElsewhere,
 } from "./advance.ts";
@@ -48,7 +50,6 @@ import { DecisionsRefresh } from "./decisionsrefresh.ts";
 import { DECISIONS_CONFIG, refreshDocument } from "./decisiondocument.ts";
 import {
   CLASSIC_SCOPES,
-  BOT_LOGIN,
   DONE_NOTICE_MS,
   FETCH_CONCURRENCY,
   FORGE_MIN_INTERVAL_MS,
@@ -72,8 +73,10 @@ import type { Active } from "./agents.ts";
 import { fillAgents, fillChanges, fillFocus, fillStatus, fillNeeds, fillOps, fillPeople, fillPriority, fillState, fillSummary, fillThemes, fillUsage, type Home, type HomeHooks, homeSkeleton, LIMIT_ID, NEED_ROW_SELECTOR, reveal, setSectionOpen, stepRow, walkRows } from "./homeview.ts";
 import { ACTION_CONFIG } from "./actions.ts";
 import { actionsPanel } from "./actionsview.ts";
+import { REVIEW_DRAFT_CONFIG } from "./reviewdrafts.ts";
+import { reviewDraftsPanel } from "./reviewdraftsview.ts";
 import { loadProjectStatus } from "./backend.ts";
-import { filterNeeds, type Need, needStops } from "./needs.ts";
+import { botWaitingCount, filterNeeds, type Need, needStops } from "./needs.ts";
 import { needId, type NeedsForm, type NeedsHooks, needsRedraw, needsSignature } from "./needsview.ts";
 import { activeFromOps, type JobCache, loadActive, loadOps, type Ops } from "./ops.ts";
 import { tickOps } from "./opsview.ts";
@@ -81,6 +84,7 @@ import { Poller, pollDelay, pollNote } from "./poller.ts";
 import { saveMine } from "./mine.ts";
 import { MINE_CLASS } from "./mineview.ts";
 import { loadPeople, markPeopleDone, type People } from "./people.ts";
+import { peopleMeta } from "./peopleview.ts";
 import {
   loadFileLines,
   loadForgePrs,
@@ -96,14 +100,15 @@ import {
   submitReview,
   type VerdictEntry,
   type WaitingPr,
+  type WaitingRead,
 } from "./prs.ts";
 import { APPROVE_ACTION, canReview, type PrPane, prView, REVIEW_FORM_CLASS, type ReviewAskInfo } from "./prview.ts";
 import { buildEntries, type Entry, itemHref, onBot, staleItems } from "./queue.ts";
 import { isSection, loadSectionPrefs, type SectionId, type SectionPrefs, saveSectionPref, sectionOpen } from "./sections.ts";
 import { loadAdvance, loadFilter, loadNeedsPriority, saveAdvance, saveFilter, saveNeedsPriority } from "./store.ts";
 import { buildTriage, type Decision, decisionLabel, parseDecision, sortDecisions, triageOrder, type TriageFilter } from "./triage.ts";
-import { age, answerState, type BoardHref, type ContextHooks, CONTEXT_CLASS, contextView, itemView, ROW_CLASS, ROW_HREF_ATTR, ROW_KEY_ATTR, ROW_SECTION_ATTR, type RowLabel, STATE_LABEL } from "./view.ts";
-import { afterReview, ON_BOT_LABEL, REASON_LABEL } from "./waiting.ts";
+import { answerState, type BoardHref, clock, type ContextHooks, CONTEXT_CLASS, contextView, itemView, ROW_CLASS, ROW_HREF_ATTR, ROW_KEY_ATTR, ROW_SECTION_ATTR, type RowLabel, STATE_LABEL, tickAges } from "./view.ts";
+import { ON_BOT_LABEL, REASON_LABEL } from "./waiting.ts";
 
 const render = createRenderer(window);
 
@@ -134,6 +139,8 @@ interface State {
   others: OtherPr[];
   /** Those of them the queue lists, and why, from the last read. */
   waiting: WaitingPr[];
+  /** Their reads that only a change to the PR moves, for the next read to reuse (see loadWaiting). */
+  waitingReads: Map<string, WaitingRead>;
   /** Their verdicts and heads, by refKey. */
   verdicts: Map<string, VerdictEntry>;
   lastForgePoll: number;
@@ -160,8 +167,8 @@ interface State {
   answered: Set<string>;
   /** Bumped per board change, so an older answered read can't land over a newer one. */
   answeredSeq: number;
-  /** PRs reviewed from this tab, by refKey. */
-  reviewed: Set<string>;
+  /** PRs reviewed from this tab, by refKey, with the head reviewed (see stillReviewed). */
+  reviewed: Map<string, string>;
   /** Those reviews' verdicts, shown until GitHub's reads agree (see overlayVerdicts); by refKey. */
   pending: Map<string, PendingVerdict>;
   /** Context of opened items, by node id. */
@@ -319,8 +326,10 @@ function renderMeta(state: State): void {
   const who = state.login ? `signed in as ${state.login}` : undefined;
   const api = state.gh.rate ? `API ${state.gh.rate.remaining}/${state.gh.rate.limit}` : undefined;
   if (who) part("mp-who", who);
-  const botCount = state.needs.filter((n) => !n.done && (n.entry?.pr?.author ?? n.entry?.item?.author ?? n.decision?.item.author)?.toLowerCase() === BOT_LOGIN.toLowerCase()).length;
-  part("mp-queues", `people ${state.people ? state.people.rows.length : "…"} · bot ${botCount}`);
+  // From what waits now, not state.needs (the rows drawn), which stays behind while a redraw is deferred under a half-written answer.
+  const botCount = botWaitingCount(currentNeeds(state));
+  const people = peopleMeta(state.people, !!state.home?.el.isConnected && !!state.home.el.querySelector<HTMLDetailsElement>("#sec-people")?.open);
+  part("mp-queues", h("span", { title: people.title }, people.text), ` · bot ${botCount}`);
   const since = cachedSince(state);
   if (since !== undefined) part("mp-age", h("span", { class: "cached", title: "Shown from this browser's cache; checking GitHub for changes" }, cachedLabel(since, Date.now())));
   else if (state.lastPoll) part("mp-age", `checked ${clock(state.lastPoll.getTime())}`);
@@ -333,10 +342,6 @@ function renderMeta(state: State): void {
   if (api) part("mp-api", api);
   byId("meta").replaceChildren(...parts);
   byId("menu-meta").textContent = [who, api].filter(Boolean).join(" · ");
-}
-
-function clock(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 /** Meta line and notices only: never touches the view, or a half-typed answer. */
@@ -429,6 +434,7 @@ function homeHooks(state: State): HomeHooks {
       if (open) void refreshTriage(state);
     },
     peopleToggled: (open) => {
+      renderChrome(state);
       if (open) void refreshPeople(state);
     },
   };
@@ -439,6 +445,7 @@ function mountHome(state: State): Home {
   if (state.home?.el.isConnected) return state.home;
   state.home = homeSkeleton(homeHooks(state));
   if (ACTION_CONFIG) state.home.el.prepend(actionsPanel(state.gh, ACTION_CONFIG));
+  if (REVIEW_DRAFT_CONFIG) state.home.el.prepend(reviewDraftsPanel(state.gh, REVIEW_DRAFT_CONFIG, render));
   showMain(state.home.el);
   return state.home;
 }
@@ -577,8 +584,9 @@ async function refreshPeople(state: State): Promise<void> {
   state.peopleRunning = true;
   const revision = state.peopleRevision;
   try {
-    const people = await loadPeople(state.gh, Date.now(), state.login === OPERATOR);
-    if (state.closed || revision !== state.peopleRevision) return;
+    const people = await readSource(state.sources, "people", (gh) => loadPeople(gh, Date.now(), state.login === OPERATOR), state.gh);
+    if (state.closed) return;
+    if (!people || revision !== state.peopleRevision) { renderChrome(state); return; }
     state.people = people;
     paintPeople(state);
     renderChrome(state);
@@ -625,7 +633,7 @@ function paintActive(state: State): void {
   if (!state.home) return;
   const model = snapshot(state);
   fillAgents(state.home, state.active, Date.now(), model.agents);
-  fillStatus(state.home, state.active?.status === undefined ? undefined : model.status, render, state.active?.statusError);
+  fillStatus(state.home, state.active?.status === undefined ? undefined : model.status, render, state.active?.statusError, Date.now(), state.active?.board);
   fillFocus(state.home, state.active?.board ? model.focus : undefined);
   fillUsage(state.home, model.usage ?? undefined, state.active?.local, Date.now());
   fillState(state.home, model);
@@ -728,6 +736,11 @@ async function refreshActive(state: State): Promise<void> {
   }
 }
 
+/** The item `#item/<id>` opens: a board item, or a decision's issue that is not on the board. */
+function routedItem(state: State, id: string): Item | undefined {
+  return [...state.items, ...(state.active?.board ?? []), ...(state.decisions?.map((d) => d.item) ?? [])].find((i) => i.nodeId === id);
+}
+
 /** Rebuild the whole view for the current route. */
 function renderRoute(state: State): void {
   if (state.closed) return;
@@ -756,7 +769,7 @@ function renderRoute(state: State): void {
     renderHome(state);
     return;
   }
-  const item = r.route === "item" ? [...state.items, ...(state.active?.board ?? []), ...(state.decisions?.map((d) => d.item) ?? [])].find((i) => i.nodeId === r.id) : undefined;
+  const item = r.route === "item" ? routedItem(state, r.id) : undefined;
   if (!item) {
     if (r.route === "item") setNotice("That item no longer needs you (or isn't on the board).");
     renderHome(state);
@@ -896,19 +909,15 @@ function renderPr(state: State, ref: { owner: string; repo: string; number: numb
         found && !canReview(detail)
           ? await submitAskedReview(state.gh, found.ref, ref, found.target.head, reviews, onSent)
           : await submitReview(state.gh, ref, reviews, onSent);
-      state.reviewed.add(key);
+      state.reviewed.set(key, detail.head);
       // Show its effect now: search and the reviews API lag a write.
       const verdict = REVIEW_VERDICT[action];
       if (verdict) {
         state.pending.set(key, { state: verdict, head: detail.head, at: Date.now() });
         // Read its reviews again on the next poll, even before search notices.
         state.verdicts.delete(key);
-        // A PR listed for what waits on him has no verdict overlay: apply the review to its wait.
-        state.waiting = state.waiting.flatMap((w) => {
-          if (refKey(w.pr.ref) !== key) return [w];
-          const wait = afterReview(w.wait, verdict);
-          return wait ? [{ ...w, wait }] : [];
-        });
+        // A PR listed for what waits on him has no verdict overlay: apply the review to its wait (and again after each read).
+        state.waiting = overlayWaiting(state.waiting, state.pending, Date.now());
       }
       // Tell the bot on its review ask. The review went out either way.
       const note = found ? reviewComment(action, ref, detail.head, url) : undefined;
@@ -1389,14 +1398,18 @@ async function pollForge(state: State): Promise<boolean> {
   }
 }
 
-/** Whose turn each PR other than a forge draft is, re-read every forge poll (check runs move without the PR); update the view if that changed. */
+/** Whose turn each PR other than a forge draft is, re-read every forge poll (check runs move without the PR; the rest only when it moved); update the view if that changed. */
 async function pollWaiting(state: State): Promise<void> {
   if (state.waitingRunning) return;
   state.waitingRunning = true;
   try {
-    const { prs: read, errors, failed } = await loadWaiting(state.gh, state.others);
-    // A PR that couldn't be read this time keeps its last standing rather than flicker out.
-    const prs = [...read, ...state.waiting.filter((w) => failed.has(refKey(w.pr.ref)))];
+    // A PR reviewed from here is read afresh until its review stops applying, as search may lag it.
+    const known = new Map([...state.waitingReads].filter(([k]) => !state.pending.has(k)));
+    const { prs: read, errors, failed, reads } = await loadWaiting(state.gh, state.others, known);
+    state.waitingReads = reads;
+    // A PR that couldn't be read this time keeps its last standing rather than flicker out;
+    // one reviewed from here keeps the review's effect over a read that started before it or lags it.
+    const prs = overlayWaiting([...read, ...state.waiting.filter((w) => failed.has(refKey(w.pr.ref)))], state.pending, Date.now());
     const sig = (w: readonly WaitingPr[]) => JSON.stringify(w.map((x) => [refKey(x.pr.ref), x.pr.title, x.pr.body, x.pr.draft, x.head, x.wait, x.verdict]));
     const changed = sig(prs) !== sig(state.waiting);
     state.waiting = prs;
@@ -1501,6 +1514,11 @@ async function refreshAnswered(state: State, items: readonly Item[]): Promise<vo
 function rebuildEntries(state: State): void {
   const { verdicts, pending } = overlayVerdicts(state.verdicts, state.pending, Date.now());
   state.pending = pending;
+  state.reviewed = stillReviewed(state.reviewed, (key) => [
+    state.verdicts.get(key)?.head,
+    state.waiting.find((w) => refKey(w.pr.ref) === key)?.head,
+    state.details.get(key)?.head,
+  ]);
   const replied = new Set([...state.verdicts].filter(([, v]) => v.botReplied).map(([k]) => k));
   state.entries = buildEntries(state.items, state.prs, verdicts, state.forgeKnown, new Set([...state.answered, ...state.sent]), {
     others: state.waiting,
@@ -1528,7 +1546,7 @@ function update(state: State, boardChanged: boolean, first: boolean): void {
       paintPriority(state);
     } else renderRoute(state);
   } else if (r.route === "item") {
-    const item = state.items.find((i) => i.nodeId === r.id);
+    const item = routedItem(state, r.id);
     if (!item) state.itemNote = "This item no longer needs you; the bot may have acted on it.";
     else if (state.shown && itemKey(item) !== state.shown.key) {
       state.itemNote = "This item changed on the board since you opened it; go back and reopen it to see the new version.";
@@ -1686,7 +1704,7 @@ function run(state: State, cmd: Command, where: Route): void {
         return;
       }
       if (r.route === "home") {
-        // The sections' data is re-read too, now rather than when due; a reload on request drops unsent picks, as the note warned.
+        // The sections' data is re-read too, now rather than when due; a reload on request drops the needs rows' unsent picks, as the note warned (the decisions document keeps its own).
         state.activeStarted = 0;
         state.opsStarted = 0;
         state.runsStarted = 0;
@@ -1863,6 +1881,7 @@ async function start(source: TokenSource): Promise<void> {
     prs: [],
     others: [],
     waiting: [],
+    waitingReads: new Map(),
     verdicts: new Map(),
     lastForgePoll: 0,
     forceForge: false,
@@ -1876,7 +1895,7 @@ async function start(source: TokenSource): Promise<void> {
     rerunning: new Set(),
     rerunsSent: new Set(),
     answeredSeq: 0,
-    reviewed: new Set(),
+    reviewed: new Map(),
     pending: new Map(),
     context: new Map(),
     details: new Map(),
@@ -1980,7 +1999,7 @@ async function start(source: TokenSource): Promise<void> {
       renderChrome(state);
       if (actionRunsDue(state)) void refreshActionRuns(state);
       // Waiting ages move on without a redraw of the rows.
-      for (const el of document.querySelectorAll<HTMLElement>(".need .age[data-since]")) el.textContent = age(el.dataset.since, Date.now());
+      tickAges(document.body, Date.now());
     }
   }, META_TICK_MS);
   await cached;

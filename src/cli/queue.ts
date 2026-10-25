@@ -1,6 +1,7 @@
 // review-queue: the review queue on the command line, as JSON or text.
 // It loads the queue exactly as the app does (board, forge PRs and their
-// verdicts, answered asks) and ranks and filters it with the same code.
+// verdicts, the bot's other PRs and whose turn each is, answered asks)
+// and ranks and filters it with the same code.
 // Read-only: the client refuses anything but GET.
 
 import { execFile } from "node:child_process";
@@ -10,7 +11,7 @@ import { loadAnswered, loadQueue } from "../github/backend.ts";
 import { ALL, applyFilter, entryOrg, NO_ORG, parseFilterToken, type QueueFilter } from "../github/filter.ts";
 import type { ForgePr, Verdict } from "../github/forge.ts";
 import { queueJson, queueText, SCHEMA } from "../github/export.ts";
-import { loadForgePrs, refreshVerdicts } from "../github/prs.ts";
+import { loadForgePrs, loadOtherPrs, loadWaiting, refreshVerdicts, searchBotPrs, type WaitingPr } from "../github/prs.ts";
 import { buildEntries, type Entry } from "../github/queue.ts";
 
 export const PROG = "review-queue";
@@ -23,7 +24,8 @@ const GITHUB_HOST = "github.com";
 export const USAGE = `Usage: ${PROG} [--json | --text] [--filter FILTER]
 
 Print what is waiting on jmarrero (the review app's queue), ranked as the
-app ranks it: P0 first, then the oldest; answered asks last.
+app ranks it: P0 first, then the oldest; answered asks, then PRs waiting
+on the bot, last.
 
   --json           the ${SCHEMA} JSON document (default when stdout isn't a terminal)
   --text           a human-readable list (default on a terminal)
@@ -169,19 +171,38 @@ export function unknownOrgWarning(entries: readonly Entry[], f: QueueFilter): st
  */
 export async function loadEntries(gh: GitHub) {
   const warnings: string[] = [];
-  const { items } = await loadQueue(gh);
+  const { items, linked } = await loadQueue(gh);
   let prs: ForgePr[] = [];
   let forgeKnown = false;
   const verdicts = new Map<string, Verdict>();
+  // A forge PR he sent back is his again once the bot replied: without
+  // this, every change request would read as his to review.
+  const replied = new Set<string>();
+  let others: WaitingPr[] = [];
+  // One search of the bot's PRs serves both lists, as in the app; each
+  // list then fails on its own, so a forge review that can't be read
+  // doesn't hide the upstream PRs waiting on him.
+  const all = searchBotPrs(gh);
+  all.catch(() => {});
   try {
-    prs = await loadForgePrs(gh);
+    prs = await loadForgePrs(gh, await all);
     forgeKnown = true;
-    for (const [k, v] of await refreshVerdicts(gh, prs, new Map())) verdicts.set(k, v.verdict);
+    for (const [k, v] of await refreshVerdicts(gh, prs, new Map())) {
+      verdicts.set(k, v.verdict);
+      if (v.botReplied) replied.add(k);
+    }
   } catch (e) {
     warnings.push(`couldn't read the forge's PRs or their reviews: ${message(e)}`);
   }
+  try {
+    const waiting = await loadWaiting(gh, await loadOtherPrs(gh, await all));
+    others = waiting.prs;
+    for (const err of waiting.errors) warnings.push(`couldn't read one of the bot's other PRs: ${err}`);
+  } catch (e) {
+    warnings.push(`couldn't read the bot's other PRs: ${message(e)}`);
+  }
   const answered = await loadAnswered(gh, items);
-  return { entries: buildEntries(items, prs, verdicts, forgeKnown, answered), warnings };
+  return { entries: buildEntries(items, prs, verdicts, forgeKnown, answered, { others, replied, linked }), warnings };
 }
 
 /** Run the CLI; the exit status: 0, 1 on failure, 2 on a usage error. */

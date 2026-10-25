@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Item } from "../src/github/board.ts";
 import type { ForgePr, Verdict } from "../src/github/forge.ts";
-import { buildNeeds, type Need, needStops, waitingCount } from "../src/github/needs.ts";
+import { parseRoute } from "../src/github/keys.ts";
+import { botWaitingCount, buildNeeds, type Need, needStops, waitingCount } from "../src/github/needs.ts";
 import { buildEntries, type Entry } from "../src/github/queue.ts";
 import { parseDecision } from "../src/github/triage.ts";
 import type { PrWait } from "../src/github/waiting.ts";
@@ -48,6 +49,11 @@ describe("representative operator asks", () => {
   const cases: { name: string; entry: Entry; action?: string }[] = [
     { name: "current explicit review request", entry: base, action: "review" },
     { name: "draft request", entry: { ...base, pr: { ...reviewPr, draft: true } } },
+    // The bot asks for his review on forge drafts: that is a concrete ask.
+    { name: "forge draft request", entry: { ...base, pr: pr("jmarrero-forge", "widget", 3) }, action: "review" },
+    { name: "forge draft request, approved", entry: { ...base, pr: pr("jmarrero-forge", "widget", 3), verdict: { state: "approved" } } },
+    { name: "forge draft request, changes requested", entry: { ...base, pr: pr("jmarrero-forge", "widget", 3), verdict: { state: "changes-requested" } } },
+    { name: "forge draft without a request", entry: { ...base, pr: pr("jmarrero-forge", "widget", 3), wait: { reasons: ["updated"], onBot: false } } },
     { name: "approved current head", entry: { ...base, verdict: { state: "approved" } } },
     { name: "comment reviewed current head", entry: { ...base, wait: { ...base.wait!, reviewedCurrentHead: true } } },
     { name: "changes requested current head", entry: { ...base, verdict: { state: "changes-requested" } } },
@@ -71,7 +77,7 @@ describe("representative operator asks", () => {
     const items = Array.from({ length: 40 }, (_, i) => tracked(`watch${i}`, 200 + i, { status: i % 2 ? "Draft" : "Needs human" }));
     items.push(tracked("question", 10, { labels: ["question"], createdAt: "2026-10-01T00:00:00Z" }), tracked("escalate", 11, { labels: ["escalate"], priority: "P0" }), tracked("answered", 12, { labels: ["question"] }));
     const needs = buildNeeds({ entries: [...entriesOf(items, ["answered"]), ...cases.map((c, i) => ({ ...c.entry, key: `case:${i}` }))] });
-    assert.equal(needs.length, 8);
+    assert.equal(needs.length, 9);
     assert.ok(needs.length <= 15);
     assert.equal(needs[0]?.key, "item:question");
     assert.ok(needs.every((n) => ["answer", "review", "write", "promote"].includes(n.action)));
@@ -102,6 +108,14 @@ describe("representative operator asks", () => {
   it("does not lose an escalation folded into a PR's board context", () => {
     const item = tracked("context", 95, { labels: ["escalate"], priority: "P0" });
     assert.deepEqual(buildNeeds({ entries: [{ ...base, item, wait: { reasons: [], onBot: true } }], board: [item] }).map((n) => n.key), ["item:context"]);
+  });
+
+  it("ages an escalation by its last move on the board, not its issue's creation", () => {
+    const moved = tracked("moved", 96, { labels: ["escalate"], createdAt: "2026-07-01T00:00:00Z", movedAt: "2026-10-20T00:00:00Z" });
+    const unknown = tracked("unknown", 97, { labels: ["escalate"], createdAt: "2026-07-01T00:00:00Z" });
+    const since = new Map(buildNeeds({ entries: [], board: [moved, unknown] }).map((n) => [n.key, n.since]));
+    assert.equal(since.get("item:moved"), "2026-10-20T00:00:00Z");
+    assert.equal(since.get("item:unknown"), undefined);
   });
 });
 
@@ -143,6 +157,16 @@ describe("buildNeeds", () => {
     assert.deepEqual(needStops(needs).map((s) => [s.key, s.waiting]), [["item:PVTI_b", true], ["item:PVTI_a", false]]);
   });
 
+  it("counts the bot's rows still waiting from the rows given, whoever raised the rest", () => {
+    const items = [ask("PVTI_a", 30, "question", `${TRACKER}/9`), ask("PVTI_b", 31, "question", `${TRACKER}/9`)];
+    const needs = buildNeeds({ entries: entriesOf(items, ["PVTI_a"]), answeredHere: new Set(["item:PVTI_a"]) });
+    const waiting = needs[0]!;
+    const theirs: Need = { ...waiting, key: "item:theirs", entry: { ...waiting.entry!, item: { ...waiting.entry!.item!, author: "someone" } } };
+    assert.equal(botWaitingCount(needs), 1);
+    assert.equal(botWaitingCount([...needs, theirs]), 1);
+    assert.equal(botWaitingCount([]), 0);
+  });
+
   it("lists only explicit review requests on non-draft PRs", () => {
     const wait = (reasons: PrWait["reasons"], onBot = false): PrWait => ({ reasons, onBot });
     const none: Verdict = { state: "none" };
@@ -159,6 +183,16 @@ describe("buildNeeds", () => {
     assert.deepEqual(got, {
       "pr:o/r#2": "review",
     });
+  });
+
+  it("lists a forge draft requesting his review once, from its read request", () => {
+    const forge = pr("jmarrero-forge", "bootc", 1);
+    const wait: PrWait = { reasons: ["review-requested"], onBot: false, askedAt: "2026-10-03T00:00:00Z" };
+    const verdicts = new Map<string, Verdict>([["jmarrero-forge/bootc#1", { state: "none" }]]);
+    const entries = buildEntries([], [forge], verdicts, true, new Set(), { others: [{ pr: forge, wait, verdict: { state: "none" } }] });
+    const needs = buildNeeds({ entries });
+    assert.deepEqual(rows(needs), [["pr:jmarrero-forge/bootc#1", "review"]]);
+    assert.equal(needs[0]?.since, "2026-10-03T00:00:00Z");
   });
 
   it("does not ask again for a PR he sent /promote on", () => {
@@ -180,6 +214,14 @@ describe("buildNeeds", () => {
       assert.equal(needs[0]?.decision?.number, 1);
       assert.equal(needs[1]?.inPlace, true);
       assert.equal(needs[1]?.href, "#item/I_40");
+    });
+
+    it("links every in-page row to a route that opens it", () => {
+      const q = ask("PVTI_q", 21, "question", `${TRACKER}/9`, QUESTION, { title: "D1: Which?" });
+      const needs = buildNeeds({ entries: entriesOf([q]), decisions: [decision("I_kwDOP9abcd", 40, "D2: Another?")] });
+      const local = needs.map((n) => n.href).filter((h) => h.startsWith("#") && h !== "#");
+      assert.equal(local.length, 2);
+      for (const h of local) assert.notEqual(parseRoute(h).route, "home", h);
     });
 
     it("drops one he answered, unless he did from the page", () => {

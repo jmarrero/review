@@ -46,7 +46,7 @@ export function scriptedFetch(route: (method: string, url: string, headers: Reco
     const r = route(method, url, headers);
     if (!r) throw new Error(`unexpected request: ${method} ${url}`);
     const status = r.status ?? 200;
-    const payload = status === 204 || status === 304 ? null : JSON.stringify(r.body ?? {});
+    const payload = status === 204 || status === 205 || status === 304 ? null : JSON.stringify(r.body ?? {});
     return new Response(payload, { status, headers: { "content-type": "application/json", ...r.headers } });
   };
   return { fetchImpl, calls };

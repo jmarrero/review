@@ -74,14 +74,35 @@ describe("rankEntries", () => {
 describe("buildEntries", () => {
   const verdicts = (pairs: [string, Verdict["state"]][]) => new Map(pairs.map(([k, state]) => [k, { state }]));
 
+  it("ages and ranks a board item by its last move, an ask by its creation", () => {
+    const items = [
+      // Filed in July, moved to Needs human yesterday: it hasn't waited 14 weeks.
+      tracked("PVTI_epic", 30, { priority: "P1", createdAt: "2026-07-01T00:00:00Z", movedAt: "2026-10-20T00:00:00Z" }),
+      tracked("PVTI_mid", 31, { priority: "P1", createdAt: "2026-10-10T00:00:00Z", movedAt: "2026-10-12T00:00:00Z" }),
+      // Never age an item by its issue: no board timestamp is age unknown.
+      tracked("PVTI_nodate", 32, { priority: "P1", createdAt: "2026-06-01T00:00:00Z" }),
+      question("PVTI_ask", 33, "https://github.com/elsewhere/r/issues/1", { priority: "P1", createdAt: "2026-10-15T00:00:00Z", movedAt: "2026-10-21T00:00:00Z" }),
+    ];
+    const entries = buildEntries(items, [], new Map());
+    assert.deepEqual(
+      entries.map((e) => [e.key, e.since]),
+      [
+        ["item:PVTI_mid", "2026-10-12T00:00:00Z"],
+        ["item:PVTI_ask", "2026-10-15T00:00:00Z"],
+        ["item:PVTI_epic", "2026-10-20T00:00:00Z"],
+        ["item:PVTI_nodate", undefined],
+      ],
+    );
+  });
+
   it("merges board items and forge PRs into one ranked list", () => {
     const items = [
       question("PVTI_q", 2, "https://github.com/elsewhere/r/issues/1", { priority: "P1", createdAt: "2026-01-05T00:00:00Z" }),
-      item("PVTI_chore", { why: "Please rerun the job", priority: "P0", createdAt: "2026-02-01T00:00:00Z" }),
+      item("PVTI_chore", { why: "Please rerun the job", priority: "P0", movedAt: "2026-02-01T00:00:00Z" }),
       item("PVTI_trackmeta", { status: "Draft", priority: "P0", branch: [] }),
       item("PVTI_trackbranch", { status: "Draft", priority: "P2", branch: ["https://github.com/jmarrero-forge/b/pull/2"] }),
       item("PVTI_stale", { status: "Draft", priority: "P0", branch: ["https://github.com/jmarrero-forge/c/pull/9"] }),
-      item("PVTI_gist", { status: "Draft", priority: "P1", gist: ["https://gist.github.com/x/1"], createdAt: "2026-01-01T00:00:00Z" }),
+      item("PVTI_gist", { status: "Draft", priority: "P1", gist: ["https://gist.github.com/x/1"], movedAt: "2026-01-01T00:00:00Z" }),
       item("PVTI_todo", { status: "Todo", priority: "P0" }),
     ];
     const prs = [

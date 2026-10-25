@@ -107,7 +107,9 @@ export type RouteInfo =
  * with its by-priority list filtered so.
  */
 export function parseRoute(hash: string): RouteInfo {
-  const item = /^#item\/(PVTI_[A-Za-z0-9_-]+)$/.exec(hash);
+  // A board item (PVTI_), or a tracker issue (I_) for a decision read
+  // off the issues API that is not on the board; main.ts's routedItem finds both.
+  const item = /^#item\/((?:PVTI|I)_[A-Za-z0-9_-]+)$/.exec(hash);
   if (item?.[1]) return { route: "item", id: item[1] };
   const pr = /^#pr\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/([1-9][0-9]{0,9})$/.exec(hash);
   // "." and ".." are no repository's name, and would climb the API path.

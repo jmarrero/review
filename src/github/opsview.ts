@@ -23,8 +23,8 @@ import {
   workGroups,
   type WorkGroup,
 } from "./ops.ts";
-import { type MistralBudget, type MistralUsage, poolPace, type Tokens, tokenTotal, type UsageData, type UsagePool, type UsageWindow } from "./usage.ts";
-import { age, pill, time } from "./view.ts";
+import { type MistralBudget, type MistralUsage, poolPace, type RunUsage, spendByRun, type SpendTotal, type Tokens, tokenTotal, UNKNOWN_KIND, type Usage, type UsageData, type UsagePool, type UsageWindow } from "./usage.ts";
+import { age, clock, pill, time } from "./view.ts";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -68,10 +68,7 @@ export function coreHoursText(n: number): string {
   return n < 10 ? n.toFixed(1) : String(Math.round(n));
 }
 
-function clock(iso: string | undefined): string {
-  const d = new Date(iso ?? "");
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
+const clockAt = (iso: string | undefined): string => clock(Date.parse(iso ?? ""));
 
 const PHASE_LABEL: Record<Phase, string> = { queued: "queued", starting: "starting", ready: "up", ending: "ending", done: "done" };
 const PHASE_TITLE: Record<Phase, string> = {
@@ -104,7 +101,7 @@ function sparkline(buckets: readonly number[], now: number): SVGSVGElement {
   buckets.forEach((v, i) => {
     const hgt = max > 0 && v > 0 ? Math.max(2, (v / max) * H) : 1;
     const from = new Date(now - (buckets.length - i) * HOUR);
-    const label = `${from.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${coreHoursText(v)} core-h`;
+    const label = `${clock(from.getTime())} · ${coreHoursText(v)} core-h`;
     el.append(svg("rect", { x: String(i * (BAR + GAP)), y: String(H - hgt), width: String(BAR), height: String(hgt), rx: "1", class: v > 0 ? "on" : "off" }, svg("title", {}, label)));
   });
   return el;
@@ -177,7 +174,7 @@ function liveRow(d: Devspace, now: number): HTMLElement {
     h(
       "span",
       { class: "up", title: `started ${time(d.startedAt ?? d.createdAt)}` },
-      `${clock(d.startedAt ?? d.createdAt)} · up `,
+      `${clockAt(d.startedAt ?? d.createdAt)} · up `,
       h("span", { class: TICK_SINCE, [ATTR_T]: String(since) }, duration(now - since)),
     ),
     leftCell,
@@ -295,7 +292,7 @@ function localSection(hb: Heartbeat | null | undefined, devspaces: DevspaceData 
     return sec;
   }
   const stale = isStale(hb, now);
-  const wake = hb.nextWakeAt && hb.loopState === "sleeping" && Date.parse(hb.nextWakeAt) > now ? ` · wakes at ${clock(hb.nextWakeAt)}` : "";
+  const wake = hb.nextWakeAt && hb.loopState === "sleeping" && Date.parse(hb.nextWakeAt) > now ? ` · wakes at ${clockAt(hb.nextWakeAt)}` : "";
   sec.append(
     h(
       "p",
@@ -332,7 +329,7 @@ const tokensTitle = (t: Tokens) =>
 function resetText(iso: string, now: number): string {
   const t = Date.parse(iso);
   const d = new Date(t);
-  const at = t - now < 20 * HOUR ? clock(iso) : d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const at = t - now < 20 * HOUR ? clock(t) : d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
   return t > now ? `resets ${at}, in ${duration(t - now, false)}` : `reset at ${at}; the percent is from before`;
 }
 
@@ -345,7 +342,7 @@ function windowRow(w: UsageWindow, now: number): HTMLElement {
       { class: "uw" },
       h("span", { class: "wl" }, label),
       h("span", { class: "pct unknown", title: "The status line hasn't reported this window; see bot-heartbeat statusline." }, "—"),
-      h("span", { class: "reset" }, `since ${clock(w.since)}`),
+      h("span", { class: "reset" }, `since ${clockAt(w.since)}`),
       tokens,
     );
   }
@@ -394,19 +391,37 @@ export function poolWords(pool: UsagePool): { short: string; long: string } {
   };
 }
 
+/** A reading older than this is stale: the usage publisher has not reported since. */
+export const poolStale = (pool: UsagePool, now: number): boolean => now - Date.parse(pool.observedAt) > HEARTBEAT_STALE_MS;
+
+/**
+ * What a bare "held" and "stale" left to be guessed: that the scheduler
+ * starts no new work on the pool (running work goes on), until when if
+ * the snapshot said, and how old a stale reading is. "" for neither.
+ */
+export function poolStateWords(pool: UsagePool, now: number): { held: string; stale: string } {
+  // A time already past (a reading from before it, not since updated) is no end to promise.
+  const next = pool.nextDispatchAt && (Date.parse(pool.nextDispatchAt) > now ? ` until ${time(pool.nextDispatchAt)}` : ` (was due to end ${time(pool.nextDispatchAt)})`);
+  return {
+    held: !pool.hold ? "" : ` · new work held${next || ""}`,
+    stale: poolStale(pool, now) ? ` · stale: read ${duration(now - Date.parse(pool.observedAt), false)} ago` : "",
+  };
+}
+
 /**
  * One pool as a compact row: its name, a thin bar of the percent used
  * with a tick at what the scheduler allows by now, and a short label of
  * the percent used against the share of the window gone. The sentence it
  * replaces (exact percents, reset, observation time) is in its expander.
  */
-function poolRow(name: string, label: string, pool: UsagePool | undefined, now: number): HTMLElement {
-  if (!pool) return h("div", { class: "pool-sum none" }, h("span", { class: "pool-name" }, label), " ", h("span", { class: "pool-label" }, "Weekly usage not reported."));
+function poolRow(name: string, label: string, pool: UsagePool | undefined, now: number, snapshotAt: string): HTMLElement {
+  if (!pool) return h("div", { class: "pool-sum none" }, h("span", { class: "pool-name" }, label), " ", h("span", { class: "pool-label" }, `No reading · ${snapshotAt ? `snapshot ${age(snapshotAt, now)} ago` : "snapshot age unknown"}.`));
   const used = pool.usedPercent.toFixed(1);
   const allowed = pool.allowedPercent.toFixed(1);
   const over = pool.usedPercent > pool.allowedPercent;
-  const stale = now - Date.parse(pool.observedAt) > HEARTBEAT_STALE_MS;
-  const flags = `${over ? " · over pace" : ""}${pool.hold ? " · held" : ""}`;
+  const stale = poolStale(pool, now);
+  const state = poolStateWords(pool, now);
+  const flags = `${over ? " · over pace" : ""}${state.held}`;
   const words = poolWords(pool);
   const clamp = (n: number, max: number) => String(Math.max(0, Math.min(max, n)));
   const y = String((POOL_BAR.height - POOL_BAR.track) / 2);
@@ -437,7 +452,7 @@ function poolRow(name: string, label: string, pool: UsagePool | undefined, now: 
       h("span", { class: "pool-name" }, label),
       " ",
       bar,
-      h("span", { class: "pool-label" }, words.short, pool.hold ? " · held" : "", stale && h("span", { class: "pool-stale" }, " · stale")),
+      h("span", { class: "pool-label" }, words.short, state.held, stale && h("span", { class: "pool-stale" }, state.stale)),
     ),
     h(
       "div",
@@ -565,10 +580,11 @@ export function weeklyUsage(data: UsageData | undefined, now: number): HTMLEleme
       h(
         "div",
         { class: "pools" },
-        ...POOLS.map(([name, label]) => poolRow(name, label, usage.pools?.[name], now)),
+        ...POOLS.map(([name, label]) => poolRow(name, label, usage.pools?.[name], now, usage.updatedAt || usage.observedAt || "")),
         ...(usage.mistral ? [mistralRow(usage.mistral, now)] : []),
         h("p", { class: "fine" }, usage.updatedAt ? `Published ${time(usage.updatedAt)}. ` : "Publication time unknown. ", usage.commentUrl ? link(usage.commentUrl, "Source ↗") : ""),
       ),
+      spendRows(usage, now),
     );
     return sec;
   }
@@ -586,6 +602,59 @@ export function weeklyUsage(data: UsageData | undefined, now: number): HTMLEleme
   const observed = usage.observedAt;
   sec.append(h("p", { class: observed && now - Date.parse(observed) <= HEARTBEAT_STALE_MS ? "fine" : "warn" }, observed ? `Observed ${time(observed)}${now - Date.parse(observed) > HEARTBEAT_STALE_MS ? " · stale" : ""}.` : "Observation time unknown; publication does not confirm a fresh subscription reading.", ` Published ${time(usage.updatedAt)}.`, usage.commentUrl ? link(usage.commentUrl, "Source ↗") : ""));
   return sec;
+}
+
+/** A pool's label in the run table: the meter's name for the ones it shows, the snapshot's word for a newer one. */
+const POOL_LABEL = new Map<string, string>([...POOLS, ["mistral", "Mistral"]]);
+
+/** "implement 12.3M (3 runs) · review 4.1M (1 run)": a total's name, tokens and run count. */
+function totalsText(totals: readonly SpendTotal[]): string {
+  return totals.map((t) => `${t.name} ${tokensText(t.tokens)} (${t.runs} ${t.runs === 1 ? "run" : "runs"})`).join(" · ");
+}
+
+function runRow(r: RunUsage): HTMLElement {
+  // Both links are built from parts the parser matched, never from a URL the snapshot gave.
+  const item = r.item ? /^([^#]+)#(\d+)$/.exec(r.item) : null;
+  const requests = r.requests === undefined ? "" : `, in ${r.requests} ${r.requests === 1 ? "request" : "requests"}`;
+  return h(
+    "tr",
+    {},
+    h("td", {}, POOL_LABEL.get(r.pool) ?? r.pool),
+    h("td", r.kind ? {} : { class: "unknown" }, r.kind ?? UNKNOWN_KIND),
+    h("td", {}, r.repository),
+    h("td", {}, item ? link(`https://github.com/${item[1]}/issues/${item[2]}`, r.item ?? "") : h("span", { class: "unknown" }, "—")),
+    h("td", { class: "num", title: `${tokensTitle(r.tokens)}${requests}` }, tokensText(tokenTotal(r.tokens))),
+    h("td", { class: "when" }, link(`https://github.com/${r.repository}/actions/runs/${r.runId}`, time(r.finishedAt))),
+  );
+}
+
+/**
+ * Where the day's spend went, run by run, largest first, with totals by
+ * kind and by repository; or one line on why the snapshot can't say.
+ */
+function spendRows(usage: Usage, now: number): HTMLElement {
+  const box = h("div", { class: "spend" }, h("h3", { class: "group-h" }, "By run, last day"));
+  if (!usage.runs) {
+    box.append(h("p", { class: "fine" }, "Not published: the snapshot carries no runs list, so nothing says which runs spent it (see the README)."));
+    return box;
+  }
+  const spend = spendByRun(usage.runs, now);
+  if (!spend.runs.length) {
+    box.append(h("p", { class: "fine" }, "No run finished in the last day."));
+    return box;
+  }
+  box.append(
+    h(
+      "table",
+      { class: "spend-runs" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Pool"), h("th", {}, "Kind"), h("th", {}, "Repository"), h("th", {}, "Item"), h("th", { class: "num" }, "Tokens"), h("th", {}, "Finished"))),
+      h("tbody", {}, ...spend.runs.map(runRow)),
+    ),
+    h("p", { class: "fine" }, "By kind: ", totalsText(spend.byKind), "."),
+    h("p", { class: "fine" }, "By repository: ", totalsText(spend.byRepository), "."),
+    h("p", { class: "fine" }, "Tokens: the broker's per-run record, cache reads included; a row links to its run."),
+  );
+  return box;
 }
 
 function consumerRow(c: Consumer, max: number): HTMLElement {

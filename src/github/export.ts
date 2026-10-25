@@ -7,7 +7,8 @@ import { commentNote, itemAction } from "./asks.ts";
 import { NO_PRIORITY, questionOf } from "./board.ts";
 import { entryOrg, filterToken, type QueueFilter } from "./filter.ts";
 import { promotionAction, VERDICT_LABEL } from "./forge.ts";
-import { effectivePriority, type Entry, type EntryKind, SETTLED_GROUP } from "./queue.ts";
+import { effectivePriority, type Entry, type EntryKind, ON_BOT_GROUP, SETTLED_GROUP } from "./queue.ts";
+import { type PrReason, type PrWait, REASON_LABEL } from "./waiting.ts";
 
 /** The schema name and major version; a breaking change bumps it. */
 export const SCHEMA = "review-queue/v1";
@@ -18,13 +19,14 @@ export const APP_URL = "https://jmarrero.github.io/review/";
 /**
  * What to do about an entry, as one verb:
  *
- * - `review`: review a PR (a forge PR in the app, or the one a review ask names);
+ * - `review`: review a PR (a forge PR in the app, one of the bot's PRs
+ *   that asks for it or needs approving to re-sign, or the one a review ask names);
  * - `answer`: answer a question (pick an option, or write);
- * - `rerun`: rerun a chore's failed workflow jobs (needs write access);
+ * - `rerun`: rerun a chore's or a PR's failed workflow jobs (needs write access);
  * - `comment`: do what a chore or unreadable review ask says, then comment;
  * - `read`: read a Draft item (usually a gist) and decide;
  * - `see-asks`: act on the asks nested under it;
- * - `wait`: nothing: he answered or approved, and the bot acts next;
+ * - `wait`: nothing: he answered, approved or requested changes, and the bot acts next;
  * - `act-on-github`: the app can't act on it (see `reason`);
  * - `report-bug`: Needs human, but the bot asked nothing; tell it.
  */
@@ -70,6 +72,8 @@ export interface EntryJson {
   appUrl: string;
   /** A forge PR's review state, as the app labels it. */
   verdict?: { state: string; label: string; url?: string };
+  /** A PR's turn beyond its verdict: on the bot's (listed last, never open), or what he is asked to do. */
+  wait?: { onBot: boolean; reasons: PrReason[] };
   /** The upstream issue or PR a top-level ask blocks, as `owner/repo#n`. */
   blocks?: string;
   /** The board item's Why, when it has one. */
@@ -97,7 +101,31 @@ export interface QueueJson {
   warnings: string[];
 }
 
+/**
+ * A PR's action from whose turn it is (see waiting.ts): nothing while it
+ * waits on the bot; else a review for a review request or an update
+ * since his change request, approving the head for a re-sign, and a
+ * rerun only when that is all it asks. Undefined when the turn says
+ * nothing beyond the verdict.
+ */
+function waitAction(wait: PrWait | undefined): ActionJson | undefined {
+  if (!wait) return undefined;
+  if (wait.onBot) return { verb: "wait", summary: "you requested changes; the bot acts next" };
+  const { reasons } = wait;
+  if (!reasons.length) return undefined;
+  const summary = reasons.map((r) => REASON_LABEL[r]).join("; ");
+  const runs = reasons.includes("rerun") && wait.runs?.length ? { targets: wait.runs.map((r) => r.url) } : {};
+  if (reasons.includes("review-requested") || reasons.includes("updated")) return { verb: "review", summary, ...runs };
+  if (reasons.includes("resign")) {
+    const unsigned = wait.unsigned?.length ? `: ${wait.unsigned.join(", ")} lack your Signed-off-by` : "";
+    return { verb: "review", summary: `${summary}${unsigned}`, ...runs };
+  }
+  return { verb: "rerun", summary: `${summary}${wait.failed?.length ? `: ${wait.failed.join(", ")}` : ""}`, ...runs };
+}
+
 function prAction(e: Entry): ActionJson {
+  const turn = waitAction(e.wait);
+  if (turn) return turn;
   const promotion = e.pr ? promotionAction(e.pr, e.verdict) : undefined;
   if (promotion === "promote") return { verb: "comment", summary: "send /promote on the approved fork PR to publish it upstream" };
   if (promotion === "write") return { verb: "read", summary: "write your title, description and commit messages for the upstream human-text policy" };
@@ -177,6 +205,7 @@ export function entryJson(e: Entry): EntryJson {
   if (e.verdict) {
     out.verdict = { state: e.verdict.state, label: VERDICT_LABEL[e.verdict.state], ...(e.verdict.url ? { url: e.verdict.url } : {}) };
   }
+  if (e.wait) out.wait = { onBot: e.wait.onBot, reasons: [...e.wait.reasons] };
   if (e.blocks) out.blocks = e.blocks;
   const item = e.item;
   if (item?.why) out.why = item.why;
@@ -255,7 +284,7 @@ export function queueText(doc: QueueJson, now: Date): string {
   // Group as the app does, by walking the same ranked order.
   let group: string | undefined;
   for (const e of doc.entries) {
-    const g = e.settled ? SETTLED_GROUP : (e.rankPriority ?? NO_PRIORITY);
+    const g = e.wait?.onBot ? ON_BOT_GROUP : e.settled ? SETTLED_GROUP : (e.rankPriority ?? NO_PRIORITY);
     if (g !== group) {
       group = g;
       out.push("", `== ${g}`);

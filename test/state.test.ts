@@ -17,6 +17,14 @@ import { installDom, rawBoardItem, scriptedFetch } from "./helpers.ts";
 const NOW = Date.parse("2026-10-02T12:00:00Z");
 const FIXTURES = resolve("test/fixtures");
 
+describe("source freshness", () => {
+  it("lists people, pending until From people is read", () => {
+    assert.deepEqual(pageState({}, NOW).sources.people, { state: "pending" });
+    const fetched = { state: "ok" as const, checkedAt: NOW, fetchedAt: NOW };
+    assert.deepEqual(pageState({ sources: { people: fetched } }, NOW).sources.people, fetched);
+  });
+});
+
 describe("confirmed shared agent execution", () => {
   const fixture = JSON.parse(readFileSync(resolve(FIXTURES, "agent-execution-context.json"), "utf8")) as { board: RawItem[]; heartbeat: unknown };
   const board = fixture.board.map(parseItem);

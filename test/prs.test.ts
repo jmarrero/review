@@ -89,7 +89,8 @@ describe("the bot's PRs other than the forge's drafts", () => {
 
   it("searches them and those requesting his review, with GitHub's own qualifiers", async () => {
     assert.equal(OTHER_QUERY, "is:pr is:open author:jmarrero-bot");
-    assert.equal(REQUESTED_QUERY, "is:pr is:open draft:false author:jmarrero-bot user-review-requested:jmarrero");
+    // Drafts too: the bot requests his review on forge drafts.
+    assert.equal(REQUESTED_QUERY, "is:pr is:open author:jmarrero-bot user-review-requested:jmarrero");
     const { fetchImpl } = github();
     const others = await loadOtherPrs(new GitHub(token, fetchImpl));
     assert.deepEqual(
@@ -101,8 +102,10 @@ describe("the bot's PRs other than the forge's drafts", () => {
         ["bootc-dev/bcvk/pull/12", false],
         ["coreos/bootupd/pull/13", false],
         ["bootc-dev/bootc/pull/14", false],
-        // A PR in the forge's own repository is here; its drafts are loadForgePrs'.
+        // A PR in the forge's own repository is here; its drafts are loadForgePrs',
         ["jmarrero-forge/workflow-compiler/pull/15", true],
+        // except those requesting his review, read here for the request.
+        ["jmarrero-forge/bootc/pull/16", true],
       ],
     );
   });
@@ -120,8 +123,10 @@ describe("the bot's PRs other than the forge's drafts", () => {
         ["requested", ["review-requested"], false],
         ["on the bot", [], true],
         ["forge repo, requested", ["review-requested"], false],
+        ["forge draft", ["review-requested"], false],
       ],
     );
+    assert.equal(prs.find((w) => w.pr.title === "forge draft")?.wait.askedAt, "2026-10-03T00:00:00Z");
     const [resign, rerun] = prs;
     assert.deepEqual(resign?.wait.unsigned, ["111111111111"]);
     assert.deepEqual([rerun?.wait.failed, rerun?.wait.runs?.map((r) => r.url)], [["required-checks"], ["https://github.com/bootc-dev/bootc/actions/runs/900"]]);
@@ -133,6 +138,39 @@ describe("the bot's PRs other than the forge's drafts", () => {
     assert.deepEqual(paths.filter((p) => /pulls\/\d+\/comments/.test(p)), ["/repos/bootc-dev/bcvk/pulls/12/comments?per_page=100"]);
     // One rules read per repository and branch.
     assert.equal(paths.filter((p) => p === "/repos/bootc-dev/bootc/rules/branches/main?per_page=100").length, 1);
+  });
+
+  it("re-reads only check runs and rules for a PR whose updated_at stands", async () => {
+    const { fetchImpl, calls } = github();
+    const gh = new GitHub(token, fetchImpl);
+    const others = await loadOtherPrs(gh);
+    const T = Date.parse("2026-10-20T00:00:00Z");
+    const first = await loadWaiting(gh, others, new Map(), T);
+    const poll = async (known: Parameters<typeof loadWaiting>[2], over = others, now = T + 60_000) => {
+      const before = calls.length;
+      const got = await loadWaiting(gh, over, known, now);
+      return { got, paths: calls.slice(before).map((c) => c.url.replace(API, "")) };
+    };
+    const uncached = await poll(new Map());
+    const cached = await poll(first.reads);
+    // 34 requests a poll uncached, 7 cached, for these 8 PRs (the requested
+    // forge draft adds its 4 reads, none of them per poll once cached).
+    assert.deepEqual([uncached.paths.length, cached.paths.length], [34, 7]);
+    assert.ok(cached.paths.every((p) => /\/check-runs\?|\/rules\/branches\//.test(p)), cached.paths.join("\n"));
+    const sig = (r: typeof first) => JSON.stringify(r.prs);
+    assert.equal(sig(cached.got), sig(uncached.got), "the same standing either way");
+    // A PR whose updated_at moved is read again; so is everything after WAITING_REUSE_MS.
+    const moved = others.map((o) => (o.pr.title === "requested" ? { ...o, pr: { ...o.pr, updatedAt: "2026-10-01T00:00:00Z" } } : o));
+    const one = await poll(cached.got.reads, moved);
+    assert.ok(one.paths.includes("/repos/jmarrero-bot/homegit/pulls/45"));
+    assert.equal(one.paths.filter((p) => /\/pulls\/\d+$/.test(p)).length, 1);
+    const old = await poll(cached.got.reads, others, T + 11 * 60_000);
+    assert.equal(old.paths.filter((p) => /\/pulls\/\d+$/.test(p)).length, others.length);
+    // A search without updated_at, or mergeability not computed yet, is no reason to trust the last read.
+    const unknown = new Map([...first.reads].map(([k, v]) => [k, { ...v, pull: { ...v.pull, mergeable_state: "unknown" } }]));
+    assert.equal((await poll(unknown)).paths.filter((p) => /\/pulls\/\d+$/.test(p)).length, others.length);
+    const undated = others.map((o) => ({ ...o, pr: { ...o.pr, updatedAt: "" } }));
+    assert.equal((await poll(first.reads, undated)).paths.filter((p) => /\/pulls\/\d+$/.test(p)).length, others.length);
   });
 
   it("reads unreadable rules as none, and fails the PRs on any other rules error", async () => {
@@ -168,7 +206,7 @@ describe("the bot's PRs other than the forge's drafts", () => {
       url.endsWith("/repos/bootc-dev/bootc/pulls/11") ? new Response(JSON.stringify({ message: "Server Error" }), { status: 500 }) : fetchImpl(url, init);
     const gh = new GitHub(token, broken);
     const { prs, errors, failed } = await loadWaiting(gh, await loadOtherPrs(gh));
-    assert.deepEqual(prs.map((w) => w.pr.title), ["resign", "requested", "on the bot", "forge repo, requested"]);
+    assert.deepEqual(prs.map((w) => w.pr.title), ["resign", "requested", "on the bot", "forge repo, requested", "forge draft"]);
     assert.equal(errors.length, 1);
     assert.match(errors[0] ?? "", /^bootc-dev\/bootc#11: /);
     assert.deepEqual([...failed], ["bootc-dev/bootc#11"]);
@@ -203,7 +241,9 @@ describe("current concrete PR asks", () => {
     { name: "comment-reviewed head", review: { state: "COMMENTED", commit_id: HEAD }, draft: false, requested: true, wanted: false },
     { name: "approved head", review: { state: "APPROVED", commit_id: HEAD }, draft: false, requested: true, wanted: false },
     { name: "reviewed older head", review: { state: "APPROVED", commit_id: MOVED }, draft: false, requested: true, wanted: true },
-    { name: "draft moved since search", review: undefined, draft: true, requested: true, wanted: false },
+    // A forge draft is what he reviews to promote; drafts upstream are needs.test's.
+    { name: "forge draft, moved since search", review: undefined, draft: true, requested: true, wanted: true },
+    { name: "forge draft, approved head", review: { state: "APPROVED", commit_id: HEAD }, draft: true, requested: true, wanted: false },
     { name: "withdrawn request", review: undefined, draft: false, requested: false, wanted: false },
     { name: "closed requested PR", review: undefined, draft: false, requested: true, state: "closed", wanted: false },
     { name: "merged requested PR", review: undefined, draft: false, requested: true, merged_at: "2026-10-02T00:00:00Z", wanted: false },
@@ -347,6 +387,22 @@ describe("loadPrDetail", () => {
       assert.equal(d.consistent, want, `${sha.slice(0, 4)} of ${total}`);
       assert.equal(d.warnings.length, want ? 0 : 1);
     }
+  });
+
+  it("reads the head's latest check runs past the first page, as the queue does", async () => {
+    const run = (i: number, conclusion = "success") => ({ name: `job ${i}`, status: "completed", conclusion });
+    const base = route(HEAD);
+    const { fetchImpl, calls } = scriptedFetch((method, url, headers) => {
+      if (!url.includes("/check-runs")) return base(method, url, headers);
+      const q = new URL(url).searchParams;
+      if (q.get("filter") !== "latest") return { body: { total_count: 1, check_runs: [run(0, "failure")] } };
+      const page = Number(q.get("page"));
+      return { body: { total_count: 150, check_runs: page === 1 ? Array.from({ length: 100 }, (_, i) => run(i)) : page === 2 ? [...Array.from({ length: 49 }, (_, i) => run(100 + i)), run(149, "failure")] : [] } };
+    });
+    const d = await loadPrDetail(new GitHub(token, fetchImpl), ref);
+    assert.equal(d.checks.filter((c) => c.name.startsWith("job ")).length, 150);
+    assert.ok(d.checks.some((c) => c.name === "job 149"));
+    assert.equal(calls.filter((c) => c.url.includes("/check-runs")).length, 2);
   });
 
   it("re-reads the PR unconditionally before reviewing, even when cached", async () => {

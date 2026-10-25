@@ -1,0 +1,8 @@
+{
+  "schema": "bot-usage/v1",
+  "updated_at": "2026-10-18T14:42:00Z",
+  "observed_at": "2026-10-18T14:40:00Z",
+  "pools": { "claude": null, "openai": null },
+  "windows": [],
+  "mistral": { "requests": 2500, "tokens": 1234567 }
+}

@@ -122,6 +122,8 @@ export function canReview(d: PrDetail, ask?: ReviewAskInfo, wait?: PrWait): bool
   if (d.state !== "open") return false;
   if (ask && samePr(ask.pr, d.ref)) return true;
   if (!d.draft && wait?.reasons.includes("review-requested")) return true;
+  // PR authorship stays the user account's, as in promote, takeover and
+  // rerun: a role app's PR isn't the bot's here (pushes stay on the user).
   if (d.author !== BOT_LOGIN) return false;
   return REVIEWABLE_OWNERS.includes(d.ref.owner) || (wait?.reasons.some((r) => REVIEW_REASONS.includes(r)) ?? false);
 }

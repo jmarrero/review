@@ -84,7 +84,7 @@ label.opt { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px;
 label.opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 label.opt input { margin-top: 4px; }
 .rec { font: 11px var(--mono); color: var(--ok); margin-left: 6px; white-space: nowrap; }
-textarea, input[type=password] { width: 100%; font: 15px/1.45 var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+textarea, input[type=password], .decision-document input[type=text] { width: 100%; font: 15px/1.45 var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
 .target { font-size: 13px; color: var(--muted); margin: 0; }
 .actions { display: flex; gap: 8px; }
 button, .button { font: 14px var(--sans); font-weight: 500; border-radius: 6px; padding: 8px 14px; cursor: pointer; border: 1px solid var(--line); background: var(--surface); color: var(--ink); text-decoration: none; }
@@ -426,6 +426,14 @@ summary.pool-sum::before { content: "▸"; }
 .pool-detail { padding: 0 0 6px calc(1em + 10px); }
 .pool-detail p, .pools .fine { font-size: 12px; color: var(--muted); margin: 2px 0; overflow-wrap: anywhere; }
 .pools .fine { margin-top: 4px; }
+/* Spend by run: a small table under the pools, largest run first, numbers in mono. */
+.spend .fine { font-size: 12px; color: var(--muted); margin: 4px 0 0; overflow-wrap: anywhere; }
+.spend-runs { border-collapse: collapse; width: 100%; font-size: 13px; }
+.spend-runs th, .spend-runs td { padding: 3px 10px 3px 0; text-align: left; vertical-align: baseline; overflow-wrap: anywhere; }
+.spend-runs th { font: 12px var(--mono); color: var(--muted); font-weight: 400; }
+.spend-runs th.num, .spend-runs td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.spend-runs td.when { white-space: nowrap; }
+.spend-runs .unknown { color: var(--muted); }
 .uw .reset, .uw .tok, .uc .tok { font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
 .uc-list { list-style: none; margin: 4px 0 0; padding: 0; }
 .uc { display: grid; grid-template-columns: minmax(0, 1fr) 8em 4.5em; gap: 2px 12px; align-items: center; padding: 3px 0; font-size: 14px; }
@@ -708,8 +716,24 @@ body:has(.chat-full) { overflow: hidden; }
 .operator-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .operator-proposal ol { padding-left: 1.5rem; }
 .operator-proposal button { max-width: 100%; white-space: normal; min-height: 44px; }
+/* Review drafts: each inline comment under the hunk lines it is on. */
+.review-drafts { padding: .75rem; }
+.review-draft { min-width: 0; overflow-wrap: anywhere; border-top: 1px solid var(--border, #8884); padding-top: 8px; }
+.review-draft-hunk div.add { background: var(--add); }
+.review-draft-hunk div.del { background: var(--del); }
+.review-draft-hunk div.at { background: var(--focus-row); }
+.review-draft-comment { margin-left: 8px; }
+.review-draft button, .review-draft-start button { min-height: 44px; }
 /* The summary at the top: a line each, wrapping, so it fits a phone. */
 .dashboard-summary ul { list-style: none; margin: 0 0 8px; padding: 0; font-size: 13px; }
 .dashboard-summary li { padding: 1px 0; overflow-wrap: anywhere; }
 .dashboard-summary .sum-jump { font-weight: 600; }
 .dashboard-summary li.hot { color: var(--p1); }
+/* iOS Safari zooms the page in when a text field under 16px takes focus and
+   leaves it zoomed, so wherever there is a touch screen (iPads too, hence
+   not max-width) every typed-into field gets a 16px floor. !important
+   because component rules such as tr.composer textarea are more specific;
+   mouse-only desktops keep their smaller sizes. */
+@media (any-pointer: coarse) {
+  textarea, select, input:not([type]), input[type=text], input[type=password], input[type=search], input[type=url], input[type=email] { font-size: 16px !important; }
+}

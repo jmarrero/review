@@ -11,7 +11,7 @@ import { OPERATOR } from "./config.ts";
 import type { Entry } from "./queue.ts";
 import { ACTION_LABEL, ACTION_TITLE, ALL_PRIORITIES, matchesPriority, type Need, needPriority, priorityChips } from "./needs.ts";
 import { decisionLabel, shortRef } from "./triage.ts";
-import { age, answerForm, askText, excerpt, KIND_LABEL, KIND_TITLE, pill, ROW_CLASS, ROW_HREF_ATTR, ROW_KEY_ATTR, ROW_SECTION_ATTR, type RowLabel, rowText, STATE_LABEL, time } from "./view.ts";
+import { age, answerForm, askText, excerpt, KIND_LABEL, KIND_TITLE, pill, ROW_CLASS, ROW_HREF_ATTR, ROW_KEY_ATTR, ROW_SECTION_ATTR, type RowLabel, rowText, SINCE_ATTR, sinceTitle, STATE_LABEL } from "./view.ts";
 
 /** Characters of the ask shown on a row before "The whole question". */
 const ASK_EXCERPT = 240;
@@ -48,11 +48,16 @@ export interface NeedsHooks {
   pickPriority?(priority: string): void;
 }
 
-/** What the rows show, so an unchanged list is not redrawn under his hands. */
-export function needsSignature(needs: readonly Need[], hooks: Pick<NeedsHooks, "login" | "loginError" | "now" | "labelOf">, entries: readonly Entry[] = []): string {
+/**
+ * What the rows show, so an unchanged list is not redrawn under his hands.
+ * It holds a row's ask time, not its age label: the page's ticker moves the
+ * label in place, and a label in here would redraw (or, under a draft, claim
+ * a change) every minute.
+ */
+export function needsSignature(needs: readonly Need[], hooks: Pick<NeedsHooks, "login" | "loginError" | "labelOf">, entries: readonly Entry[] = []): string {
   return JSON.stringify([
     [hooks.login, hooks.loginError],
-    needs.map((n) => [n.key, n.action, n.title, n.priority, n.why, n.href, n.where, n.done === true, n.parent?.key, n.decision?.item.nodeId, n.decision?.item.body, n.entry?.item?.body, n.entry ? hooks.labelOf(n.entry)?.text : undefined, age(n.since, hooks.now)]),
+    needs.map((n) => [n.key, n.action, n.title, n.priority, n.why, n.href, n.where, n.done === true, n.parent?.key, n.decision?.item.nodeId, n.decision?.item.body, n.entry?.item?.body, n.entry ? hooks.labelOf(n.entry)?.text : undefined, n.since]),
     entries.flatMap((e) => [e, ...(e.children ?? [])]).map((e) => [e.key, e.title, e.where, e.href, e.verdict?.state, e.wait?.onBot, e.wait?.reasons, rowText(e), hooks.labelOf(e)]),
   ]);
 }
@@ -109,17 +114,44 @@ function whoNote(needs: readonly Need[], hooks: NeedsHooks): HTMLElement | null 
 
 const chipLabel = (priority: string): string => (priority === ALL_PRIORITIES ? "All" : priority === NO_PRIORITY ? "None" : priority);
 
+/** A row's place in the list as built, so rows moved in and out of Watching keep their order. */
+export const NEED_ORDER_ATTR = "data-order";
+/** The fold under the rows: rows past the limit, then the entries only being watched. */
+export const WATCHING_CLASS = "watching";
+export const WATCHING_ITEM_CLASS = "watching-item";
+
 /**
  * Show only the rows at `priority` under `root`, and mark its chip. Done
  * on the rows as drawn, so that picking a filter never takes a half
  * written answer away.
+ *
+ * The filter comes before the limit: the first `limit` rows at `priority`
+ * go in the list and only the rest of them in the Watching fold, so a chip
+ * never counts rows the list doesn't show. Rows are moved, not redrawn
+ * (a moved node keeps what is typed in it). Rows the filter hides stay in
+ * the list, out of sight.
  */
-export function applyPriority(root: HTMLElement, priority: string): void {
+export function applyPriority(root: HTMLElement, priority: string, limit = Infinity): void {
+  const rows = [...root.querySelectorAll<HTMLElement>(`.${NEED_CLASS}`)].map((row, i) => ({ row, i, order: Number(row.getAttribute(NEED_ORDER_ATTR) ?? i) })).sort((a, b) => a.order - b.order || a.i - b.i).map((r) => r.row);
+  const watching = root.querySelector<HTMLDetailsElement>(`:scope > details.${WATCHING_CLASS}`);
+  const main: HTMLElement[] = [];
+  const overflow: HTMLElement[] = [];
   let shown = 0;
-  for (const row of root.querySelectorAll<HTMLElement>(`.${NEED_CLASS}`)) {
+  for (const row of rows) {
     const on = priority === ALL_PRIORITIES || row.getAttribute(PRIORITY_ATTR) === priority;
     row.classList.toggle(NEED_FILTERED_CLASS, !on);
     if (on) shown++;
+    (on && shown > limit && watching ? overflow : main).push(row);
+  }
+  const head = root.querySelector(`:scope > .${NEEDS_HEAD_CLASS}`);
+  if (head) head.after(...main);
+  else root.prepend(...main);
+  if (watching) {
+    const summary = watching.querySelector(":scope > summary");
+    summary?.after(...overflow);
+    const count = overflow.length + watching.querySelectorAll(`.${WATCHING_ITEM_CLASS}`).length;
+    if (summary) summary.textContent = `Watching (${count})`;
+    watching.hidden = count === 0;
   }
   for (const chip of root.querySelectorAll<HTMLElement>(`.${NEEDS_HEAD_CLASS} button[${PRIORITY_ATTR}]`)) {
     const on = chip.getAttribute(PRIORITY_ATTR) === priority;
@@ -135,9 +167,10 @@ export function applyPriority(root: HTMLElement, priority: string): void {
 
 /**
  * The bar over the rows: who answers, and a chip per priority with how
- * many rows wait at it. `root` is what the chips filter (the rows' slot).
+ * many rows wait at it. `root` is what the chips filter (the rows' slot),
+ * showing at most `limit` rows before Watching (applyPriority).
  */
-export function needsHead(needs: readonly Need[], hooks: NeedsHooks, root: HTMLElement): HTMLElement {
+export function needsHead(needs: readonly Need[], hooks: NeedsHooks, root: HTMLElement, limit = Infinity): HTMLElement {
   const selected = hooks.priority ?? ALL_PRIORITIES;
   const chips = h("div", { class: "needs-filter", role: "group", "aria-label": "Filter by priority" });
   for (const c of priorityChips(needs, selected)) {
@@ -150,7 +183,7 @@ export function needsHead(needs: readonly Need[], hooks: NeedsHooks, root: HTMLE
       h("span", { class: "count" }, String(c.count)),
     );
     chip.addEventListener("click", () => {
-      applyPriority(root, c.priority);
+      applyPriority(root, c.priority, limit);
       hooks.pickPriority?.(c.priority);
     });
     chips.append(chip);
@@ -192,7 +225,12 @@ export function needRow(n: Need, hooks: NeedsHooks): HTMLElement {
   const since = n.since;
   const form = n.inPlace && !n.done ? answerPart(n, hooks) : null;
   // One small line: priority, where it is (a link to GitHub, where it can also be answered), and how long it has waited.
-  const where = item?.url ? shortRef(item.url) : n.where;
+  // A PR row is about the PR: its board item only tracks it, so the PR is
+  // the location and the item, when it is a separate issue, a second link.
+  const pr = e?.pr;
+  const tracks = pr && item?.url && item.url.toLowerCase() !== pr.url.toLowerCase() ? item.url : undefined;
+  const whereUrl = pr ? pr.url : item?.url;
+  const where = pr ? n.where : item?.url ? shortRef(item.url) : n.where;
   const sub = h(
     "span",
     { class: "sub" },
@@ -203,10 +241,13 @@ export function needRow(n: Need, hooks: NeedsHooks): HTMLElement {
     h(
       "span",
       { class: "tag" },
-      link(item?.url, where),
-      [item?.org, n.parent ? `for ${excerpt(n.parent.title, 48)}` : undefined].filter(Boolean).map((t) => ` · ${t}`).join(""),
+      link(whereUrl, where),
+      tracks ? " · tracks " : null,
+      tracks ? link(tracks, shortRef(tracks)) : null,
+      // The board's Org, unless it is the PR's owner, already in its reference.
+      [pr && item?.org?.toLowerCase() === pr.ref.owner.toLowerCase() ? undefined : item?.org, n.parent ? `for ${excerpt(n.parent.title, 48)}` : undefined].filter(Boolean).map((t) => ` · ${t}`).join(""),
       " · ",
-      h("span", { class: "age", title: since ? `asked ${time(since)}` : "ask date not available", ...(since ? { "data-since": since } : {}) }, age(since, hooks.now) || "age unknown"),
+      h("span", { class: "age", title: since ? sinceTitle(e, since, "asked") : "ask date not available", ...(since ? { [SINCE_ATTR]: since } : {}) }, age(since, hooks.now) || "age unknown"),
     ),
     n.done ? h("span", { class: "state answered" }, STATE_LABEL.answered) : label ? h("span", { class: `state ${label.cls}` }, label.text) : null,
   );

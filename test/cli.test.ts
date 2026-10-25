@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ALL } from "../src/github/filter.ts";
-import { age, type EntryJson, printable, type QueueJson, SCHEMA } from "../src/github/export.ts";
+import { type ActionJson, age, type EntryJson, printable, type QueueJson, SCHEMA, suggestedAction } from "../src/github/export.ts";
+import type { Entry } from "../src/github/queue.ts";
+import type { PrWait } from "../src/github/waiting.ts";
 import { type Io, parseArgs, readOnly, run, tokenFrom, UsageError } from "../src/cli/queue.ts";
 import { fields, fixture, rawItems, scriptedFetch, type Scripted } from "./helpers.ts";
 
@@ -20,7 +22,11 @@ function world(method: string, url: string): Scripted | undefined {
   const path = url.slice(API.length);
   if (url.startsWith(`${PROJECT}/fields`)) return { body: fields() };
   if (url.startsWith(`${PROJECT}/items`)) return { body: [...rawItems(), ...fixture<unknown[]>("cli-questions.json")] };
-  if (path.startsWith("/search/issues?")) return { body: fixture("forge-search.json") };
+  if (path.startsWith("/search/issues?")) {
+    // These drafts are forge entries, not explicit review requests.
+    if (decodeURIComponent(path).includes("user-review-requested:")) return { body: { total_count: 0, items: [] } };
+    return { body: fixture("forge-search.json") };
+  }
   const pulls = /^\/repos\/jmarrero-forge\/(\w+)\/pulls\?state=open/.exec(path);
   if (pulls) {
     const n = { widget: 5, homegit: 9, bootc: 3 }[pulls[1] as string];
@@ -147,8 +153,10 @@ describe("review-queue --json", () => {
     const r = await runCli(["--json"], (m, url) => (url.includes("/search/") ? { status: 503, body: { message: "down" } } : world(m, url)));
     assert.equal(r.status, 0);
     const doc = JSON.parse(r.stdout) as QueueJson;
-    assert.equal(doc.warnings.length, 1);
+    // The one search failed, so neither list of PRs was read.
+    assert.equal(doc.warnings.length, 2);
     assert.match(r.stderr, /warning: couldn't read the forge's PRs.*503/);
+    assert.match(r.stderr, /warning: couldn't read the bot's other PRs.*503/);
     assert.ok(!doc.entries.some((e) => e.kind === "pr"));
   });
 
@@ -158,6 +166,87 @@ describe("review-queue --json", () => {
     assert.equal(r.stdout, "");
     assert.equal(r.stderr, "review-queue: GitHub refused the token (HTTP 401); check $GH_TOKEN/$GITHUB_TOKEN, or `gh auth status`; the token needs read:project for the board\n");
   });
+});
+
+describe("review-queue: whose turn a PR is", () => {
+  const UPSTREAM = "https://github.com/example-upstream/widget/pull/60";
+  /** His change request on widget#5 at its head, and the bot's reply if `replied`. */
+  const turns =
+    (replied: boolean) =>
+    (method: string, url: string): Scripted | undefined => {
+      const path = url.slice(API.length);
+      // The requests search finds an upstream PR asking for his review; the other search, the forge's drafts.
+      if (path.startsWith("/search/issues?") && decodeURIComponent(path).includes("user-review-requested:")) {
+        const item = { html_url: UPSTREAM, title: "widget: Upstream fix", body: "", user: { login: "jmarrero-bot" }, created_at: "2026-01-07T00:00:00Z", updated_at: "2026-01-08T00:00:00Z", draft: false, pull_request: {} };
+        return { body: { total_count: 1, items: [item] } };
+      }
+      if (path.startsWith("/repos/jmarrero-forge/widget/pulls/5/reviews")) {
+        return { body: [{ user: { login: "jmarrero" }, state: "CHANGES_REQUESTED", submitted_at: "2026-01-11T00:00:00Z", commit_id: HEAD }] };
+      }
+      if (path.startsWith("/repos/jmarrero-forge/widget/issues/5/comments")) {
+        return { body: replied ? [{ user: { login: "jmarrero-bot" }, created_at: "2026-01-12T00:00:00Z", html_url: "https://github.com/c/2", body: "done" }] : [] };
+      }
+      if (/^\/repos\/jmarrero-forge\/\w+\/pulls\/\d+\/comments/.test(path)) return { body: [] };
+      if (path === "/repos/example-upstream/widget/pulls/60") {
+        return { body: { number: 60, html_url: UPSTREAM, state: "open", title: "widget: Upstream fix", requested_reviewers: [{ login: "jmarrero" }], head: { sha: HEAD }, base: { ref: "main" } } };
+      }
+      if (path.startsWith("/repos/example-upstream/widget/commits/")) return { body: { total_count: 0, check_runs: [] } };
+      if (/^\/repos\/example-upstream\/widget\/(rules|pulls\/60\/reviews|issues\/60\/(comments|timeline))/.test(path)) return { body: [] };
+      return world(method, url);
+    };
+  const pr = (doc: QueueJson, where: string) => doc.entries.find((e) => e.where === where);
+
+  it("waits on the bot for a PR he sent back, last and not open", async () => {
+    const r = await runCli(["--json"], turns(false));
+    assert.equal(r.stderr, "");
+    const doc = JSON.parse(r.stdout) as QueueJson;
+    const forge = pr(doc, "jmarrero-forge/widget#5");
+    assert.deepEqual(forge?.wait, { onBot: true, reasons: [] });
+    assert.equal(forge?.action.verb, "wait");
+    assert.equal(doc.entries.at(-1), forge);
+    // The base's 12 open, less widget#5, plus the upstream PR.
+    assert.equal(doc.counts.open, 12);
+    const text = (await runCli(["--text"], turns(false), true)).stdout.split("\n");
+    const group = text.indexOf("== Changes requested, waiting on the bot");
+    assert.ok(group > 0);
+    assert.match(text[group + 1] ?? "", /jmarrero-forge\/widget#5/);
+  });
+
+  it("is his again once the bot replied", async () => {
+    const doc = JSON.parse((await runCli(["--json"], turns(true))).stdout) as QueueJson;
+    const forge = pr(doc, "jmarrero-forge/widget#5");
+    assert.deepEqual(forge?.wait, { onBot: false, reasons: ["updated"] });
+    assert.deepEqual(forge?.action, { verb: "review", summary: "the bot responded to your change request" });
+    assert.equal(doc.counts.open, 13);
+  });
+
+  it("lists the bot's upstream PR that requests his review", async () => {
+    const doc = JSON.parse((await runCli(["--json"], turns(false))).stdout) as QueueJson;
+    const up = pr(doc, "example-upstream/widget#60");
+    assert.equal(up?.kind, "pr");
+    assert.deepEqual(up?.wait, { onBot: false, reasons: ["review-requested"] });
+    assert.deepEqual(up?.action, { verb: "review", summary: "review requested" });
+  });
+
+  it("still lists it when a forge PR's reviews can't be read", async () => {
+    const route = turns(false);
+    const r = await runCli(["--json"], (m, url) => (url.includes("/jmarrero-forge/bootc/pulls/3/reviews") ? { status: 503, body: { message: "down" } } : route(m, url)));
+    const doc = JSON.parse(r.stdout) as QueueJson;
+    assert.deepEqual(doc.warnings.map((w) => w.split(":")[0]), ["couldn't read the forge's PRs or their reviews"]);
+    assert.ok(pr(doc, "example-upstream/widget#60"));
+  });
+});
+
+describe("a PR's action from its turn", () => {
+  const entry = (wait: PrWait): Entry => ({ key: "pr:o/r#1", kind: "pr", title: "t", where: "o/r#1", href: "#pr/o/r/1", wait });
+  const run = { url: "https://github.com/o/r/actions/runs/9", owner: "o", repo: "r", id: "9" };
+  const cases: [string, PrWait, ActionJson][] = [
+    ["re-sign", { reasons: ["resign"], onBot: false, unsigned: ["abc1234"] }, { verb: "review", summary: "approve to re-sign (DCO): abc1234 lack your Signed-off-by" }],
+    ["rerun alone", { reasons: ["rerun"], onBot: false, failed: ["ci/test"], runs: [run] }, { verb: "rerun", summary: "required checks failed: rerun: ci/test", targets: [run.url] }],
+    ["review and rerun", { reasons: ["review-requested", "rerun"], onBot: false, runs: [run] }, { verb: "review", summary: "review requested; required checks failed: rerun", targets: [run.url] }],
+    ["on the bot", { reasons: [], onBot: true }, { verb: "wait", summary: "you requested changes; the bot acts next" }],
+  ];
+  for (const [name, wait, want] of cases) it(name, () => assert.deepEqual(suggestedAction(entry(wait)), want));
 });
 
 describe("review-queue --text", () => {
