@@ -14,7 +14,6 @@ import {
   identityProblem,
   joinBody,
   hasGeneratedBy,
-  lineDiff,
   LLMS_TRAILER,
   type MineEdit,
   mineRefusal,
@@ -39,7 +38,7 @@ const TREE2 = "b".repeat(40);
 const META = "<!-- bot-meta -->\n---\n\n- Upstream: `up/widget`, base `main`\n- Board item: `PVTI_x`\n<!-- /bot-meta -->";
 const BODY = `Fix the widget.\n\n${LLMS_TRAILER}\n\n${META}`;
 const ME = { name: "Joseph Marrero Corchado", email: "jmarrero@redhat.com" };
-const BOT = { name: "Joseph Marrero Corchado (automation)", email: "jmarrero+llm@gmail.com", date: "2026-09-01T10:00:00Z" };
+const BOT = { name: "Joseph Marrero Corchado (automation)", email: "jmarrero+bot@gmail.com", date: "2026-09-01T10:00:00Z" };
 
 const sha = (s: string) => createHash("sha1").update(s).digest("hex");
 
@@ -202,17 +201,6 @@ describe("text helpers", () => {
   it("normalizes messages to one trailing newline", () => {
     assert.equal(normalizeMessage("a\r\n\r\nb\n\n\n"), "a\n\nb\n");
     assert.equal(normalizeMessage("  \n"), "");
-  });
-
-  it("diffs lines", () => {
-    assert.deepEqual(lineDiff("a\nb\nc", "a\nx\nc"), [
-      { kind: "same", text: "a" },
-      { kind: "add", text: "x" },
-      { kind: "del", text: "b" },
-      { kind: "same", text: "c" },
-    ]);
-    assert.deepEqual(lineDiff("same\n", "same"), [{ kind: "same", text: "same" }]);
-    assert.deepEqual(lineDiff("a", "a\nb").map((l) => l.kind), ["same", "add"]);
   });
 
   it("checks identities", () => {

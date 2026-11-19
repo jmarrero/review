@@ -1,10 +1,12 @@
 {
   "name": "review",
   "private": true,
-  "description": "Review queue for jmarrero-bot's Workstream board",
+  "description": "Control app for jmarrero-bot's Workstream board",
   "type": "module",
   "bin": {
-    "review-queue": "dist-cli/review-queue.js"
+    "review-queue": "dist-cli/review-queue.js",
+    "control-app": "dist-cli/control-app.js",
+    "control-plane": "dist-cli/control-plane.js"
   },
   "engines": {
     "node": ">=22.18"
@@ -14,6 +16,7 @@
     "dev": "node build.ts --serve",
     "typecheck": "tsc",
     "test": "node --test 'test/*.test.ts'",
+    "test:browser": "playwright test",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
@@ -22,6 +25,7 @@
     "markdown-it": "^14.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/jsdom": "^21.1.7",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^24.0.0",

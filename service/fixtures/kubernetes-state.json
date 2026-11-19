@@ -1,0 +1,95 @@
+{
+  "items": [
+    {
+      "kind": "Deployment",
+      "namespace": "apps",
+      "name": "api",
+      "images": [
+        { "container": "api", "image": "registry.example:5000/team/api:v1.4.0", "tag": "v1.4.0" },
+        { "container": "proxy", "image": "proxy@sha256:0123456789abcdef", "tag": null }
+      ],
+      "replicas": 2,
+      "readyReplicas": 2,
+      "updatedReplicas": 2,
+      "rollingOut": false
+    },
+    {
+      "kind": "Deployment",
+      "namespace": "apps",
+      "name": "web",
+      "images": [
+        { "container": "web", "image": "web:v2.1.0", "tag": "v2.1.0" }
+      ],
+      "replicas": 3,
+      "readyReplicas": 3,
+      "updatedReplicas": 1,
+      "rollingOut": true
+    },
+    {
+      "kind": "Pod",
+      "namespace": "apps",
+      "name": "api-6d4f-fghij",
+      "phase": "Running",
+      "problem": "restarting",
+      "restarts": 1,
+      "reason": "OOMKilled"
+    },
+    {
+      "kind": "Pod",
+      "namespace": "apps",
+      "name": "web-7b9c-klmno",
+      "phase": "Running",
+      "problem": "crash-looping",
+      "restarts": 14,
+      "reason": "CrashLoopBackOff"
+    },
+    {
+      "kind": "Pod",
+      "namespace": "apps",
+      "name": "web-7b9c-pqrst",
+      "phase": "Pending",
+      "problem": "pending",
+      "restarts": 0,
+      "reason": "Unschedulable"
+    },
+    {
+      "kind": "Kustomization",
+      "namespace": "flux-system",
+      "name": "apps",
+      "ready": false,
+      "message": "Deployment/apps/web dry-run failed: spec.replicas: Invalid value: -1",
+      "appliedRevision": "main@sha1:4f2a9c1e0b7d"
+    },
+    {
+      "kind": "Kustomization",
+      "namespace": "flux-system",
+      "name": "infrastructure",
+      "ready": true,
+      "message": "Applied revision: main@sha1:4f2a9c1e0b7d",
+      "appliedRevision": "main@sha1:4f2a9c1e0b7d"
+    },
+    {
+      "kind": "Kustomization",
+      "namespace": "flux-system",
+      "name": "tenants",
+      "ready": null,
+      "message": "Reconciliation in progress",
+      "appliedRevision": null
+    },
+    {
+      "kind": "Deployment",
+      "namespace": "flux-system",
+      "name": "kustomize-controller",
+      "images": [
+        { "container": "manager", "image": "ghcr.io/fluxcd/kustomize-controller:v1.4.0", "tag": "v1.4.0" }
+      ],
+      "replicas": 1,
+      "readyReplicas": 1,
+      "updatedReplicas": 1,
+      "rollingOut": true
+    }
+  ],
+  "complete": true,
+  "readAt": "2026-11-10T12:00:00Z",
+  "error": null
+}

@@ -1,0 +1,120 @@
+{
+  "schema": "review-service/v1",
+  "generation": 1,
+  "decision": {
+    "items": [
+      {
+        "schema": "agent-board/decision/v1",
+        "observed_at": "2026-11-09T12:00:00Z",
+        "validated_at": null,
+        "complete": false,
+        "holds_complete": false,
+        "failures": 0,
+        "provenance": {
+          "producer": "board-forge/pass",
+          "mode": "preview",
+          "holds": "agent-board/holds/v1",
+          "usage": "observed",
+          "usage_computed_at": "2026-11-09T12:00:00Z"
+        },
+        "holds": [
+          {
+            "item": null,
+            "url": null,
+            "epic": false,
+            "kind": "pools",
+            "reason": "test has no current window; new runs wait",
+            "operator": false,
+            "priority": null,
+            "question": null,
+            "since": "2026-11-09T12:00:00Z",
+            "carried": false
+          }
+        ],
+        "holds_omitted": 0,
+        "needs_you": null,
+        "work": {
+          "schema": "agent-board/dispatchable-work/v1",
+          "repositories": {
+            "example/work": {
+              "reviews_complete": false,
+              "issues_complete": false,
+              "count": 0,
+              "counts": {},
+              "omitted": 0,
+              "items": []
+            }
+          }
+        },
+        "wip": {
+          "limit": 8,
+          "in_flight": 0
+        },
+        "candidates": null,
+        "preview_starts": {},
+        "confirmed_effects": {
+          "starts": {},
+          "starts_by_pool": {},
+          "comments_created": 0,
+          "comments_edited": 0
+        },
+        "pools": [
+          {
+            "name": "bare-endpoint",
+            "evidence": "observed",
+            "hold": null,
+            "reason": "[redacted]",
+            "used_percent": null,
+            "allowed_percent": null,
+            "observed_at": "2026-11-09T12:00:00Z",
+            "resets_at": null
+          },
+          {
+            "name": "bare-host",
+            "evidence": "observed",
+            "hold": null,
+            "reason": "[redacted]",
+            "used_percent": null,
+            "allowed_percent": null,
+            "observed_at": "2026-11-09T12:00:00Z",
+            "resets_at": null
+          },
+          {
+            "name": "test",
+            "evidence": "observed",
+            "hold": false,
+            "reason": "[redacted]",
+            "used_percent": 10.0,
+            "allowed_percent": 50.0,
+            "observed_at": "2026-11-09T12:00:00Z",
+            "resets_at": null
+          },
+          {
+            "name": "token",
+            "evidence": "observed",
+            "hold": null,
+            "reason": "[redacted]",
+            "used_percent": null,
+            "allowed_percent": null,
+            "observed_at": "2026-11-09T12:00:00Z",
+            "resets_at": null
+          },
+          {
+            "name": "url",
+            "evidence": "observed",
+            "hold": null,
+            "reason": "[redacted]",
+            "used_percent": null,
+            "allowed_percent": null,
+            "observed_at": "2026-11-09T12:00:00Z",
+            "resets_at": null
+          }
+        ],
+        "pools_omitted": 0
+      }
+    ],
+    "complete": false,
+    "readAt": "2026-11-09T12:00:00Z",
+    "error": null
+  }
+}

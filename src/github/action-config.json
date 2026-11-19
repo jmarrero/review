@@ -1,7 +1,13 @@
 {
-  "operator": "",
-  "planner": "",
-  "tracker": "",
-  "repositories": [],
-  "project": ""
+  "operator": "jmarrero",
+  "planner": "jmarrero-bot",
+  "tracker": "jmarrero-forge/tracker",
+  "repositories": [
+    "jmarrero-forge/actions",
+    "jmarrero-forge/agenthome",
+    "jmarrero-forge/tracker",
+    "jmarrero/review"
+  ],
+  "project": "https://github.com/orgs/jmarrero-forge/projects/1",
+  "org": "jmarrero-forge"
 }

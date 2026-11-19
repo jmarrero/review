@@ -1,0 +1,19 @@
+{
+  "schema": "agent-board/dispatchable-work/v1",
+  "repositories": {
+    "example/work": {
+      "reviews_complete": true,
+      "issues_complete": false,
+      "count": 5,
+      "counts": {"continue": 1, "merge": 1, "accepted-plan": 2, "held": 2},
+      "omitted": 1,
+      "items": [
+        {"item": "example/work#8", "kind": "continue", "reason": "Finish the implementation", "operator": false, "head": "observed-head", "taken": true},
+        {"item": "example/work#9", "kind": "accepted-plan", "plan_kind": "implement", "operator": false},
+        {"item": "example/work#12", "kind": "held", "plan_kind": "implement", "hold_kind": "needs-human", "reason": "Choose the compatibility policy", "operator": true, "carried": true},
+        {"item": "example/work#13", "kind": "held", "hold_kind": "wip", "reason": "Waiting for an available slot", "operator": false}
+      ]
+    },
+    "example/unread": {"reviews_complete": false, "issues_complete": false, "count": 0, "counts": {}, "omitted": 0, "items": []}
+  }
+}

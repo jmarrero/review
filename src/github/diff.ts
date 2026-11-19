@@ -216,6 +216,53 @@ export function wordDiff(a: string, b: string): WordDiff {
   return { old: oa.spans, new: ob.spans };
 }
 
+/** A line of `lineDiff`, kept, added or deleted. */
+export type DiffLine = { kind: "same" | "add" | "del"; text: string };
+
+/** Middles whose line counts multiply past this are shown replaced whole. */
+const LINE_DIFF_MAX_CELLS = 1_000_000;
+
+/**
+ * The lines of `before` and `after`, ignoring line endings and trailing
+ * blank lines, as kept, added or deleted. Like wordDiff, a longest common
+ * subsequence decides what stayed over the middle left by the common
+ * prefix and suffix; a middle too large for that (a rewritten 64 KiB
+ * file) is shown deleted, then added, rather than costing seconds.
+ */
+export function lineDiff(before: string, after: string): DiffLine[] {
+  const a = before.replace(/\r\n?/g, "\n").trimEnd().split("\n");
+  const b = after.replace(/\r\n?/g, "\n").trimEnd().split("\n");
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const ma = a.slice(pre, a.length - suf);
+  const mb = b.slice(pre, b.length - suf);
+  const line = (kind: DiffLine["kind"]) => (text: string): DiffLine => ({ kind, text });
+  const out = a.slice(0, pre).map(line("same"));
+  const n = ma.length;
+  const m = mb.length;
+  if (n * m > LINE_DIFF_MAX_CELLS) out.push(...ma.map(line("del")), ...mb.map(line("add")));
+  else {
+    const w = m + 1;
+    const dp = new Uint32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i * w + j] = ma[i] === mb[j] ? (dp[(i + 1) * w + j + 1] as number) + 1 : Math.max(dp[(i + 1) * w + j] as number, dp[i * w + j + 1] as number);
+      }
+    }
+    for (let i = 0, j = 0; i < n || j < m; ) {
+      if (i < n && j < m && ma[i] === mb[j]) {
+        out.push(line("same")(ma[i++] as string));
+        j++;
+      } else if (j < m && (i >= n || (dp[i * w + j + 1] as number) >= (dp[(i + 1) * w + j] as number))) out.push(line("add")(mb[j++] as string));
+      else out.push(line("del")(ma[i++] as string));
+    }
+  }
+  out.push(...a.slice(a.length - suf).map(line("same")));
+  return out;
+}
+
 /** An inclusive range of new-side line numbers. */
 export type LineRange = readonly [start: number, end: number];
 

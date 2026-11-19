@@ -1,0 +1,109 @@
+{
+  "schema": "agent-board/passes/v1",
+  "fixture_kind": "synthetic proposed independent history, not producer output",
+  "published_at": "2026-11-05T11:58:40Z",
+  "retention": 10,
+  "omitted": 0,
+  "passes": [
+    {
+      "run": {"repository": "jmarrero-forge/tracker", "id": 42070000005, "attempt": 1},
+      "started_at": "2026-11-05T11:55:00Z",
+      "finished_at": "2026-11-05T11:58:30Z",
+      "mode": "actions",
+      "result": "success",
+      "sections": [
+        {"name": "pull-requests", "outcome": "ok", "error": null},
+        {"name": "epics", "outcome": "ok", "error": null},
+        {"name": "schedule", "outcome": "ok", "error": null},
+        {"name": "maintain", "outcome": "skipped", "error": null}
+      ],
+      "starts": [],
+      "no_start": [
+        {"reason": "no-ready-work", "item": null, "until": null, "cap": null, "hold": null},
+        {"reason": "replan-wait", "item": "jmarrero-forge/tracker#601", "until": "2026-11-05T14:30:00Z", "cap": null, "hold": null},
+        {"reason": "held", "item": "jmarrero-forge/review#240", "until": null, "cap": null, "hold": "needs-human"}
+      ],
+      "candidates": {"read": 14, "unread": 0, "ready": 0},
+      "omitted": {"sections": 0, "starts": 0, "no_start": 0}
+    },
+    {
+      "run": {"repository": "jmarrero-forge/tracker", "id": 42070000004, "attempt": 2},
+      "started_at": "2026-11-05T11:40:00Z",
+      "finished_at": "2026-11-05T11:44:10Z",
+      "mode": "actions",
+      "result": "success",
+      "sections": [
+        {"name": "pull-requests", "outcome": "ok", "error": null},
+        {"name": "schedule", "outcome": "ok", "error": null}
+      ],
+      "starts": [
+        {"state": "confirmed", "item": "jmarrero-forge/review#245", "kind": "implement", "pool": "claude", "run": {"repository": "jmarrero-forge/tracker", "id": 42064057295}},
+        {"state": "confirmed", "item": "jmarrero-forge/agent-board#681", "kind": "triage", "pool": "openai", "run": null},
+        {"state": "uncertain", "item": "jmarrero-forge/tracker#590", "kind": "implement", "pool": "claude", "run": null}
+      ],
+      "no_start": [{"reason": "capped", "item": null, "until": null, "cap": "wip", "hold": null}],
+      "candidates": {"read": 15, "unread": 0, "ready": 4},
+      "omitted": {"sections": 0, "starts": 0, "no_start": 0}
+    },
+    {
+      "run": {"repository": "jmarrero-forge/tracker", "id": 42070000003, "attempt": 1},
+      "started_at": "2026-11-05T11:25:00Z",
+      "finished_at": "2026-11-05T11:27:00Z",
+      "mode": "actions",
+      "result": "partial",
+      "sections": [
+        {"name": "pull-requests", "outcome": "failed", "error": "API rate limit exceeded for installation"},
+        {"name": "epics", "outcome": "ok", "error": null},
+        {"name": "schedule", "outcome": "cut-short", "error": null}
+      ],
+      "starts": [],
+      "no_start": [{"reason": "no-ready-work", "item": null, "until": null, "cap": null, "hold": null}],
+      "candidates": {"read": 6, "unread": 9, "ready": 0},
+      "omitted": {"sections": 0, "starts": 0, "no_start": 0}
+    },
+    {
+      "run": {"repository": "jmarrero-forge/tracker", "id": 42070000002, "attempt": 1},
+      "started_at": "2026-11-05T11:10:00Z",
+      "finished_at": "2026-11-05T11:10:40Z",
+      "mode": "actions",
+      "result": "failure",
+      "sections": [{"name": "setup", "outcome": "failed", "error": "HTTP 503 from the board"}],
+      "starts": [],
+      "no_start": [],
+      "candidates": null,
+      "omitted": {"sections": 0, "starts": 0, "no_start": 0}
+    },
+    {
+      "run": null,
+      "started_at": "2026-11-05T10:50:00Z",
+      "finished_at": "2026-11-05T10:52:00Z",
+      "mode": "preview",
+      "result": "success",
+      "sections": [{"name": "schedule", "outcome": "ok", "error": null}],
+      "starts": [{"state": "preview", "item": "jmarrero-forge/tracker#612", "kind": "research", "pool": "openai", "run": null}],
+      "no_start": [],
+      "candidates": {"read": 15, "unread": 0, "ready": 1},
+      "omitted": {"sections": 0, "starts": 2, "no_start": 0}
+    }
+  ],
+  "pools": {
+    "observed_at": "2026-11-05T11:58:00Z",
+    "complete": true,
+    "omitted": 0,
+    "items": [
+      {"pool": "openai", "observed_at": "2026-11-05T11:58:00Z", "used_percent": 12.5, "allowed_percent": 55, "resets_at": "2026-11-06T09:00:00Z", "held": false, "ready": 0},
+      {"pool": "claude", "observed_at": "2026-11-05T11:58:00Z", "used_percent": 48, "allowed_percent": 52, "resets_at": "2026-11-05T15:20:00Z", "held": true, "ready": 0},
+      {"pool": "mistral", "observed_at": "2026-11-05T11:58:00Z", "used_percent": null, "allowed_percent": null, "resets_at": null, "held": null, "ready": null}
+    ]
+  },
+  "in_flight": {
+    "observed_at": "2026-11-05T11:58:00Z",
+    "complete": true,
+    "omitted": 0,
+    "runs": [{"item": "jmarrero-forge/review#245", "kind": "implement", "pool": "claude", "run": {"repository": "jmarrero-forge/tracker", "id": 42064057295}, "since": "2026-11-05T11:41:00Z"}],
+    "prs": [
+      {"repository": "jmarrero-forge/agent-board", "number": 680, "state": "merge-queue", "since": "2026-11-05T11:30:00Z"},
+      {"repository": "jmarrero-forge/review", "number": 244, "state": "review-wait", "since": "2026-11-05T09:12:00Z"}
+    ]
+  }
+}

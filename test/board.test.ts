@@ -19,7 +19,6 @@ import {
   parseApiIssueUrl,
   parseIssueUrl,
   questionOf,
-  questionProblem,
   queueItems,
 } from "../src/github/board.ts";
 import { fields, rawBoardItem, rawItems } from "./helpers.ts";
@@ -193,8 +192,8 @@ describe("questions", () => {
     ["the tracker, when overridden", open, sandbox, /not in jmarrero-bot\/review-sandbox/],
   ];
   for (const [name, facts, scope, want] of problems) {
-    it(`questionProblem: ${name}`, () => {
-      const got = questionProblem(facts, scope);
+    it(`askProblem for a question: ${name}`, () => {
+      const got = askProblem(facts, "question", scope);
       if (want) assert.match(got ?? "", want);
       else assert.equal(got, undefined);
     });

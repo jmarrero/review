@@ -1,0 +1,36 @@
+# Publish the control app service's image (service/Containerfile) to
+# GHCR when a v* tag is pushed, under that tag alone: deployments pin a
+# tag (or the digest this prints), and nothing moves under them.
+name: image
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/control-app:${{ github.ref_name }}
+          # Compatibility name for one release; remove after callers migrate.
+          LEGACY_IMAGE: ghcr.io/${{ github.repository_owner }}/review-service:${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_SERVICE_TAG: ${{ github.ref_name }}
+          REVIEW_SERVICE_COMMIT: ${{ github.sha }}
+        run: |
+          podman build -f service/Containerfile --build-arg REVIEW_SERVICE_TAG --build-arg REVIEW_SERVICE_COMMIT -t "$IMAGE" .
+          podman tag "$IMAGE" "$LEGACY_IMAGE"
+          podman login ghcr.io -u "$ACTOR" --password-stdin <<< "$GH_TOKEN"
+          podman push --digestfile digest "$IMAGE"
+          podman push "$LEGACY_IMAGE"
+          echo "Pushed $IMAGE@$(cat digest)" >> "$GITHUB_STEP_SUMMARY"

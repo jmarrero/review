@@ -1,46 +1,29 @@
 import { h, link } from "../dom.ts";
 import type { Renderer } from "../markdown.ts";
 import type { GitHub } from "./api.ts";
-import { dispatchFailed, EVENTS, loadDraftIssues, readPr, refText, sendDraft, startDraft, type DraftIssue, type Excerpt, type ReviewDraftConfig } from "./reviewdrafts.ts";
+import { asOperator } from "./backend.ts";
+import { KEEP_ATTR, KEEP_BUSY } from "./maintainview.ts";
+import { dispatchFailed, EVENTS, readPr, refText, sendDraft, startDraft, type DraftIssue, type Excerpt, type ReviewDraftConfig } from "./reviewdrafts.ts";
 
-/**
- * The open review drafts, each as its review will look, with Send; and
- * Draft review for a PR. Reads only while open: opening it reads the draft
- * issues again, and nothing polls.
- */
-export function reviewDraftsPanel(gh: GitHub, c: ReviewDraftConfig, render: Renderer): HTMLDetailsElement {
-  const list = h("div");
-  const status = h("p", { role: "status" });
+/** Draft review: create a PR's draft issue and start its drafting run, then `started` (to read the drafts again). */
+export function draftReviewForm(gh: GitHub, c: ReviewDraftConfig, started: () => void): HTMLFormElement {
   const input = h("input", { type: "text", placeholder: "OWNER/REPO#N or PR URL", "aria-label": "Pull request to draft a review of" });
   const start = h("button", { type: "submit" }, "Draft review");
-  const started = h("p", { role: "status" });
-  const form = h("form", { class: "review-draft-start" }, input, start, started);
-  const panel = h("details", { class: "review-drafts sec" }, h("summary", {}, "Review drafts"),
-    h("p", { class: "note" }, `Open ${c.label} issues in ${c.tracker}. Send ticks the issue's send box as you; the tracker's workflow posts the review.`),
-    form, status, list);
-  let loading = false;
-  const load = (): void => {
-    if (loading) return;
-    loading = true; status.textContent = "Reading drafts…";
-    void loadDraftIssues(gh, c).then(async (issues) => {
-      list.replaceChildren(...await Promise.all(issues.map((d) => draftCard(gh, c, render, d))));
-      status.textContent = issues.length ? "" : "No open review drafts.";
-    }).catch((e: unknown) => { status.textContent = String(e); }).finally(() => { loading = false; });
-  };
-  panel.addEventListener("toggle", () => { if (panel.open) load(); });
+  const result = h("p", { role: "status" });
+  const form = h("form", { class: "review-draft-start" }, input, start, result);
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
     if (start.disabled || !input.value.trim()) return;
-    start.disabled = true; started.textContent = "Starting…";
+    start.disabled = true; result.textContent = "Starting…";
     void startDraft(gh, c, input.value).then((s) => {
       const what = s.retried ? "Retried on the existing draft issue" : "Created the draft issue";
-      started.replaceChildren(s.dispatchError ? `${what}, but the drafting run did not start (${s.dispatchError}); Draft review again retries it: `
+      result.replaceChildren(s.dispatchError ? `${what}, but the drafting run did not start (${s.dispatchError}); Draft review again retries it: `
         : s.retried ? `${what}: ` : "Drafting: ", link(s.issue, s.issue));
       input.value = "";
-      load();
-    }).catch((e: unknown) => { started.textContent = String(e); }).finally(() => { start.disabled = false; });
+      started();
+    }).catch((e: unknown) => { result.textContent = String(e); }).finally(() => { start.disabled = false; });
   });
-  return panel;
+  return form;
 }
 
 function excerptView(e: Excerpt): HTMLElement {
@@ -48,7 +31,8 @@ function excerptView(e: Excerpt): HTMLElement {
     h("div", { class: `${r.kind}${i === e.at ? " at" : ""}` }, `${String(r.new ?? "").padStart(5)} ${r.kind === "add" ? "+" : r.kind === "del" ? "-" : " "}${r.text}`)));
 }
 
-async function draftCard(gh: GitHub, c: ReviewDraftConfig, render: Renderer, d: DraftIssue): Promise<HTMLElement> {
+/** A draft as its review will look, flagged where it can't be sent, with Send; the inbox's Send card shows it too. */
+export async function draftCard(gh: GitHub, c: ReviewDraftConfig, render: Renderer, d: DraftIssue, changed?: (sent: boolean) => void): Promise<HTMLElement> {
   const card = h("section", { class: "review-draft" }, h("h3", {}, link(d.issue.html_url, d.issue.title)));
   const flags = h("ul", { class: "review-draft-flags" });
   const flag = (text: string) => flags.append(h("li", {}, text));
@@ -83,8 +67,11 @@ async function draftCard(gh: GitHub, c: ReviewDraftConfig, render: Renderer, d: 
   send.addEventListener("click", () => {
     if (send.disabled || !window.confirm(`Approve sending this review of ${draft ? refText(draft.pr) : "this PR"}?`)) return;
     send.disabled = true; status.textContent = "Ticking the send box…";
-    void sendDraft(gh, c, d).then(() => { status.textContent = "Ticked: the tracker's workflow sends it."; })
-      .catch((e: unknown) => { status.textContent = String(e); send.disabled = false; });
+    card.dataset.sent = "sending";
+    status.setAttribute(KEEP_ATTR, KEEP_BUSY);
+    void asOperator(gh, () => sendDraft(gh, c, d)).then(() => { status.textContent = "Ticked: the tracker's workflow sends it."; changed?.(true); })
+      .catch((e: unknown) => { status.textContent = `Not sent or uncertain: ${String(e)}. Check GitHub; do not retry here.`; changed?.(false); })
+      .finally(() => status.removeAttribute(KEEP_ATTR));
   });
   card.append(send, status);
   return card;

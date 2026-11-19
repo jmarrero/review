@@ -20,7 +20,7 @@
 
 import { parseBlocks, type Question, unfencedLines } from "../answer.ts";
 import { askKind, askProblem, type IssueRef, type Item, questionOf } from "./board.ts";
-import { DRAFT } from "./config.ts";
+import { DRAFT, NEEDS_HUMAN } from "./config.ts";
 import type { ReviewAction } from "./forge.ts";
 
 /** A PR the bot asks him to review, at the head it expects. */
@@ -193,7 +193,7 @@ export type ItemAction =
   | { kind: "rerun"; ref: IssueRef; body: AskBody }
   /** Any other chore, or a review or rerun the app can't read: a comment box. */
   | { kind: "comment"; ref: IssueRef; ask: "review" | "chore"; body: AskBody }
-  /** An ask the bot closed. */
+  /** An ask the bot closed, or an item with no operator action. */
   | { kind: "done" }
   /** An ask the app can't act on (not assigned to him, say): why. */
   | { kind: "blocked"; reason: string }
@@ -214,7 +214,7 @@ export function itemAction(item: Item, openAsks: number): ItemAction {
   const kind = askKind(item);
   if (kind === undefined) {
     if (item.status === DRAFT) return { kind: "read" };
-    return openAsks > 0 ? { kind: "asks" } : { kind: "bug" };
+    return openAsks > 0 ? { kind: "asks" } : { kind: item.status === NEEDS_HUMAN ? "bug" : "done" };
   }
   if (item.state === "closed") return { kind: "done" };
   const problem = askProblem(item, kind);

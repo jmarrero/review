@@ -7,7 +7,7 @@ import {
   dispatchFailed, draftDigest, draftsIn, excerpt, loadDraftIssues, newestDraft, parsePrRef, readPr, REVIEW_DRAFT_CONFIG, reviewDraftConfig, sendBoxState, sendDraft,
   startDraft, tickSendBox, type RawComment, type RawIssue, type ReviewDraftConfig,
 } from "../src/github/reviewdrafts.ts";
-import { reviewDraftsPanel } from "../src/github/reviewdraftsview.ts";
+import { draftCard } from "../src/github/reviewdraftsview.ts";
 import { createRenderer } from "../src/markdown.ts";
 import { installDom, scriptedFetch, type Scripted } from "./helpers.ts";
 
@@ -351,7 +351,7 @@ test("concurrent Draft reviews of one PR dispatch one run, first and on retry", 
   assert.ok(!dispatchFailed(t.issues[0]!.body));
 });
 
-test("the panel reads on open and renders the draft beside its hunk, with Send enabled", async () => {
+test("the card renders the draft beside its hunk, with Send enabled", async () => {
   const win = installDom();
   const render = createRenderer(win as unknown as Parameters<typeof createRenderer>[0]);
   const f = scriptedFetch((_m, url) => {
@@ -361,12 +361,10 @@ test("the panel reads on open and renders the draft beside its hunk, with Send e
     if (url.includes("/pulls/7/files")) return { body: [files[0], { filename: "src/b.c", patch: "@@ -1,3 +1,3 @@\n a\n b\n-q\n+r" }] };
     return undefined;
   });
-  const panel = reviewDraftsPanel(new GitHub(async () => "t", f.fetchImpl), c, render);
+  const gh = new GitHub(async () => "t", f.fetchImpl);
+  const [draft] = await loadDraftIssues(gh, c);
+  const panel = await draftCard(gh, c, render, draft!);
   document.body.replaceChildren(panel);
-  assert.equal(f.calls.length, 0);
-  panel.open = true;
-  panel.dispatchEvent(new win.Event("toggle"));
-  await new Promise((resolve) => setTimeout(resolve, 30));
   assert.match(panel.textContent!, /Request changes/);
   assert.match(panel.textContent!, /fix this/);
   assert.equal(panel.querySelectorAll(".review-draft-hunk").length, 2);
@@ -374,7 +372,7 @@ test("the panel reads on open and renders the draft beside its hunk, with Send e
   assert.equal(panel.querySelector(".review-draft-flags")!.textContent, "");
 });
 
-test("the panel flags a moved head and disables Send", async () => {
+test("the card flags a moved head and disables Send", async () => {
   const win = installDom();
   const render = createRenderer(win as unknown as Parameters<typeof createRenderer>[0]);
   const f = scriptedFetch((_m, url) => {
@@ -383,10 +381,9 @@ test("the panel flags a moved head and disables Send", async () => {
     if (url.endsWith("/pulls/7")) return { body: pr("b".repeat(40)) };
     return undefined;
   });
-  const panel = reviewDraftsPanel(new GitHub(async () => "t", f.fetchImpl), c, render);
-  panel.open = true;
-  panel.dispatchEvent(new win.Event("toggle"));
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  const gh = new GitHub(async () => "t", f.fetchImpl);
+  const [draft] = await loadDraftIssues(gh, c);
+  const panel = await draftCard(gh, c, render, draft!);
   assert.match(panel.querySelector(".review-draft-flags")!.textContent!, /head moved .*needs a redraft/);
   assert.equal(panel.querySelector<HTMLButtonElement>(".review-draft button")!.disabled, true);
 });

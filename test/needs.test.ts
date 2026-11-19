@@ -42,6 +42,12 @@ function pr(owner: string, repo: string, number: number): ForgePr {
 const rows = (needs: readonly Need[]) => needs.map((n) => [n.key, n.action]);
 const entriesOf = (items: Item[], answered: string[] = []) => buildEntries(items, [], new Map(), true, new Set(answered));
 
+it("orders needs as auto-next steps through them: P0 first, then newest within a priority", () => {
+  const q = (n: number, priority?: string) => tracked(`PVTI_q${n}`, n, { labels: ["question"], body: `Blocks: ${TRACKER}/9\n${QUESTION}`, createdAt: `2026-01-${10 + n}T00:00:00Z`, ...(priority ? { priority } : {}) });
+  const needs = buildNeeds({ entries: entriesOf([q(1, "P2"), q(2, "P0"), q(3, "P2"), q(4), q(5, "P1")]) });
+  assert.deepEqual(needs.map((n) => `${n.priority ?? "-"} ${n.where.split("#")[1]}`), ["P0 2", "P1 5", "P2 3", "P2 1", "- 4"]);
+});
+
 describe("representative operator asks", () => {
   const forkBody = "<!-- bot-meta -->\n- Upstream: `upstream/widget`\n- Contribution policy: `human-text`\n<!-- /bot-meta -->";
   const reviewPr = { ...pr("upstream", "widget", 1), draft: false };
@@ -75,9 +81,9 @@ describe("representative operator asks", () => {
 
   it("a representative mixed board has only concrete asks, well below fifteen", () => {
     const items = Array.from({ length: 40 }, (_, i) => tracked(`watch${i}`, 200 + i, { status: i % 2 ? "Draft" : "Needs human" }));
-    items.push(tracked("question", 10, { labels: ["question"], createdAt: "2026-10-01T00:00:00Z" }), tracked("escalate", 11, { labels: ["escalate"], priority: "P0" }), tracked("answered", 12, { labels: ["question"] }));
+    items.push(tracked("question", 10, { labels: ["question"], createdAt: "2026-10-01T00:00:00Z" }), tracked("answered", 12, { labels: ["question"] }));
     const needs = buildNeeds({ entries: [...entriesOf(items, ["answered"]), ...cases.map((c, i) => ({ ...c.entry, key: `case:${i}` }))] });
-    assert.equal(needs.length, 9);
+    assert.equal(needs.length, 8);
     assert.ok(needs.length <= 15);
     assert.equal(needs[0]?.key, "item:question");
     assert.ok(needs.every((n) => ["answer", "review", "write", "promote"].includes(n.action)));
@@ -105,17 +111,10 @@ describe("representative operator asks", () => {
     assert.deepEqual(buildNeeds({ entries: [], decisions: [newer, old], board }).map((n) => n.key), ["decision:I_92", "decision:I_93"]);
   });
 
-  it("does not lose an escalation folded into a PR's board context", () => {
-    const item = tracked("context", 95, { labels: ["escalate"], priority: "P0" });
-    assert.deepEqual(buildNeeds({ entries: [{ ...base, item, wait: { reasons: [], onBot: true } }], board: [item] }).map((n) => n.key), ["item:context"]);
-  });
-
-  it("ages an escalation by its last move on the board, not its issue's creation", () => {
-    const moved = tracked("moved", 96, { labels: ["escalate"], createdAt: "2026-07-01T00:00:00Z", movedAt: "2026-10-20T00:00:00Z" });
-    const unknown = tracked("unknown", 97, { labels: ["escalate"], createdAt: "2026-07-01T00:00:00Z" });
-    const since = new Map(buildNeeds({ entries: [], board: [moved, unknown] }).map((n) => [n.key, n.since]));
-    assert.equal(since.get("item:moved"), "2026-10-20T00:00:00Z");
-    assert.equal(since.get("item:unknown"), undefined);
+  it("gives a question off the board the Priority of the item it blocks, for the inbox's order", () => {
+    const epic = tracked("epic", 90, { labels: ["epic"], priority: "P0", status: "In Progress" });
+    const q = parseDecision(tracked("I_92", 92, { title: "Which?", labels: ["question"], body: QUESTION, parent: epic.ref! }));
+    assert.equal(buildNeeds({ entries: [], decisions: [q], board: [epic] })[0]?.priority, "P0");
   });
 });
 
@@ -255,8 +254,8 @@ describe("buildNeeds", () => {
   });
 
   it("steps through questions in place and opens the rest", () => {
-    const items = [ask("PVTI_q", 21, "question", `${TRACKER}/9`), tracked("PVTI_r", 22, { labels: ["escalate"] })];
-    const stops = needStops(buildNeeds({ entries: entriesOf(items) }));
-    assert.deepEqual(stops.map((s) => [s.key, s.href, s.inPlace]), [["item:PVTI_q", "#", true], ["item:PVTI_r", `${TRACKER}/22`, false]]);
+    const stops = needStops(buildNeeds({ entries: entriesOf([ask("PVTI_q", 21, "question", `${TRACKER}/9`)]) }));
+    assert.deepEqual(stops.map((s) => [s.key, s.href, s.inPlace]), [["item:PVTI_q", "#", true]]);
   });
 });
+

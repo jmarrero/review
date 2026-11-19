@@ -1,0 +1,52 @@
+{
+  "schema": "agent-board/holds/v1",
+  "at": "2026-11-05T12:00:00Z",
+  "holds": [],
+  "pass_view": {
+    "schema": "agent-board/pass-view/v1",
+    "observed_at": "2026-11-05T12:00:00Z",
+    "complete": true,
+    "omitted": 0,
+    "passes": [
+      {
+        "at": "2026-11-05T12:00:00Z",
+        "result": "partial",
+        "sections": [{"name": "reviews", "result": "failure", "error": "API rate limit exceeded"}, {"name": "schedule", "result": "success", "error": null}],
+        "started": [],
+        "reasons": [
+          {"item": null, "kind": "no-ready-work", "reason": "No ready work in openai", "until": null},
+          {"item": "example/work#12", "kind": "replan-delay", "reason": "Waiting out re-plan delay", "until": "2026-11-05T12:30:00Z"},
+          {"item": null, "kind": "capped", "reason": "Dispatch cap reached", "until": null},
+          {"item": "example/work#13", "kind": "held", "reason": "Needs operator", "until": null}
+        ],
+        "omitted": 0
+      },
+      {
+        "at": "2026-11-05T11:55:00Z",
+        "result": "success",
+        "sections": [{"name": "schedule", "result": "success", "error": null}],
+        "started": [{"item": "example/work#11", "kind": "implement", "pool": "claude", "run": {"repository": "example/runner", "id": 42}}, {"item": "example/work#10", "kind": "triage", "pool": "openai", "run": {"repository": "example/runner", "id": 40}}],
+        "reasons": [],
+        "omitted": 0
+      },
+      {
+        "at": "2026-11-05T11:50:00Z",
+        "result": "failure",
+        "sections": [{"name": "items", "result": "failure", "error": "HTTP 503"}],
+        "started": [],
+        "reasons": [],
+        "omitted": 0
+      }
+    ],
+    "pools": [
+      {"name": "openai", "used_percent": 10, "allowed_percent": 60, "resets_at": "2026-11-05T14:00:00Z", "ready": 0, "under_pace": true},
+      {"name": "claude", "used_percent": 45, "allowed_percent": 50, "resets_at": "2026-11-05T13:00:00Z", "ready": 2, "under_pace": false},
+      {"name": "other", "used_percent": null, "allowed_percent": null, "resets_at": null, "ready": null, "under_pace": null}
+    ],
+    "in_flight": [
+      {"state": "running", "item": "example/work#11", "kind": "implement", "pool": "claude", "run": {"repository": "example/runner", "id": 42}, "started_at": "2026-11-05T11:55:00Z"},
+      {"state": "merge-queue", "repository": "example/work", "number": 14},
+      {"state": "waiting-review", "repository": "example/work", "number": 15}
+    ]
+  }
+}

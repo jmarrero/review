@@ -133,29 +133,27 @@ export async function loadPeople(gh: GitHub, now = Date.now(), notifications = t
     author: subject.user?.login ?? "unknown", action: reviewRequested ? "Review" : "Reply", ci: subject.pull_request || subject.head ? "unknown" : "n/a", notificationIds: [], reviewRequested,
   });
   const search = async () => {
-    const subjects: PeopleSubject[] = [];
     for (let page = 1; page <= SEARCH_PAGES; page++) {
       const { data } = await gh.get<{ items: PeopleSubject[]; incomplete_results?: boolean }>(`/search/issues?q=${encodeURIComponent(PEOPLE_QUERY)}&sort=updated&order=desc&per_page=100&page=${page}`);
-      subjects.push(...data.items);
       if (data.incomplete_results) result.warnings.push("GitHub review-request search is incomplete.");
+      await mapLimit(data.items, FETCH_CONCURRENCY, async (subject) => {
+        const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(subject.html_url);
+        if (!match || subject.state !== "open" || !isHuman(subject.user)) return;
+        const ref = { owner: match[1]!, repo: match[2]!, number: Number(match[3]) };
+        const row = makeRow(ref, subject, true);
+        byKey.set(row.key, row);
+        try {
+          const events = await timeline(ref);
+          const request = events.filter((e) => e.event === "review_requested" && e.requested_reviewer?.login?.toLowerCase() === OPERATOR.toLowerCase()).sort((a, b) => (eventTime(b) ?? "").localeCompare(eventTime(a) ?? ""))[0];
+          const requestedAt = request && eventTime(request);
+          if (requestedAt && Number.isFinite(Date.parse(requestedAt)) && Date.parse(requestedAt) <= now) row.requestedAt = requestedAt;
+        } catch (e) {
+          result.warnings.push(`Request age unavailable for ${row.key}: ${errorText(e)}`);
+        }
+      });
       if (data.items.length < 100) break;
       if (page === SEARCH_PAGES) result.warnings.push("Review-request search reached GitHub's 1,000-result limit.");
     }
-    await mapLimit(subjects, FETCH_CONCURRENCY, async (subject) => {
-      const match = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(subject.html_url);
-      if (!match || subject.state !== "open" || !isHuman(subject.user)) return;
-      const ref = { owner: match[1]!, repo: match[2]!, number: Number(match[3]) };
-      const row = makeRow(ref, subject, true);
-      byKey.set(row.key, row);
-      try {
-        const events = await timeline(ref);
-        const request = events.filter((e) => e.event === "review_requested" && e.requested_reviewer?.login?.toLowerCase() === OPERATOR.toLowerCase()).sort((a, b) => (eventTime(b) ?? "").localeCompare(eventTime(a) ?? ""))[0];
-        const requestedAt = request && eventTime(request);
-        if (requestedAt && Number.isFinite(Date.parse(requestedAt)) && Date.parse(requestedAt) <= now) row.requestedAt = requestedAt;
-      } catch (e) {
-        result.warnings.push(`Request age unavailable for ${row.key}: ${errorText(e)}`);
-      }
-    });
   };
   const readNotifications = async () => {
     if (!notifications) return;

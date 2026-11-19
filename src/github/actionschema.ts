@@ -74,3 +74,9 @@ function evaluate(value: unknown, rule: Rule): Set<string> | undefined {
 }
 
 export function matchesActionSchema(value: unknown): boolean { return !!evaluate(value, schema as Rule); }
+
+/** The action `type`s the schema defines, so a proposal naming another can say which. */
+export const ACTION_KINDS: ReadonlySet<string> = new Set((schema.$defs.action.oneOf as Rule[]).flatMap((r) => {
+  const t = r.properties?.type;
+  return t?.enum ?? (t && Object.hasOwn(t, "const") ? [t.const] : []);
+}).filter((k): k is string => typeof k === "string"));

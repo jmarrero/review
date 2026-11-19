@@ -1,5 +1,4 @@
 // Per-viewer conveniences kept in localStorage: the queue's filter, the
-// priority the Decisions rows are filtered by, the
 // diff layout, whether the review guide is shown, whether the app moves
 // on to the next entry after an action, which files he marked
 // viewed, which guide hotspots he has seen, and his unsent line comments. Storage can be
@@ -7,7 +6,6 @@
 // guarded and the app works the same without it, only forgetting more.
 
 import { ALL, filterToken, isFilterToken, parseFilterToken, type QueueFilter } from "./filter.ts";
-import { ALL_PRIORITIES, isNeedsPriority } from "./needs.ts";
 
 const PREFIX = "review.";
 /** Files marked viewed kept at most; the oldest go first. */
@@ -53,15 +51,6 @@ export function loadFilter(): QueueFilter {
 
 export function saveFilter(f: QueueFilter): void {
   save("queue.filter", filterToken(f));
-}
-
-/** The priority the Decisions rows were last filtered by. */
-export function loadNeedsPriority(): string {
-  return load("needs.priority", ALL_PRIORITIES, isNeedsPriority);
-}
-
-export function saveNeedsPriority(priority: string): void {
-  save("needs.priority", priority);
 }
 
 export type DiffLayout = "unified" | "split";

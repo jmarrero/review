@@ -1,17 +1,28 @@
-// The session chat pane, atop the page: start (or find) a session run of a
+// The item chat drawer: start (or find) a session run of a
 // configured workflow, wait for its bridge, and talk to it over ACP.
 //
 // A session run serves one ACP client over a WebSocket in the tailnet; when
 // that client leaves, the run ends. So the pane only connects after the
 // operator asks it to here (Start or Attach), never on page load, and it
 // never dispatches a run while one is already live: it attaches to it.
+//
+// Operator-action proposals the agent writes show as preview cards only
+// (docs/operator-actions.md); nothing the agent sends reaches a write.
 
 import { h } from "../dom.ts";
 import { GitHubError, type GitHub } from "./api.ts";
 import { CHAT_CONFIG, DEFAULT_REF, chatEndpoint, type ChatConfig, type ChatSource } from "./chatconfig.ts";
+import { ITEM_CHAT_EVENT, chatItem, itemLinks, publicItemRef, sessionInputs, type ChatAnswer, type ChatItem } from "./chatitem.ts";
+import { MaybeSentError } from "./backend.ts";
+import { OPERATOR } from "./config.ts";
+import { ACTION_CONFIG, PROPOSAL_LIMIT, actionBlocks } from "./actions.ts";
+import { chatProposalCard } from "./actionsview.ts";
+import { sessionDispatchPanel } from "./sessiondispatch.ts";
 
 export interface ChatPanel {
   mount(slot: HTMLElement): void;
+  /** Open the drawer about `item`, or, without one, for a plain chat. */
+  open(item?: ChatItem): void;
   dispose(): void;
   /** Whether a session is attached: disposing would end its run. */
   attached(): boolean;
@@ -20,6 +31,8 @@ export interface ChatPanel {
 }
 
 export interface ChatOptions {
+  /** Service-owned destinations; only the hosted entry point discovers these. */
+  sessions?: readonly { id: string; label: string }[];
   /** The repository's configuration (CHAT_CONFIG when absent); undefined disables chat. */
   config?: ChatConfig | undefined;
   socketFactory?: (url: string) => WebSocket;
@@ -41,6 +54,10 @@ export const LIVE_STATUSES: ReadonlySet<string> = new Set(["queued", "in_progres
 const RUNS_PER_PAGE = 10;
 /** Largest publication comment body read. */
 const MAX_COMMENT = 65536;
+/** Characters of a session transcript drawn before the rest waits behind a button. */
+const TRANSCRIPT_CHARS = 1024 * 1024;
+/** Top-level transcript entries drawn. */
+const TRANSCRIPT_NODES = 1000;
 
 export interface LiveRun {
   source: ChatSource;
@@ -53,6 +70,9 @@ export interface LiveRun {
   endpoint?: string;
   /** Where the run is, from its jobs' steps, for the status line. */
   stage: RunStage;
+  items: string[];
+  createdAt?: string;
+  actor?: string;
 }
 
 /**
@@ -186,7 +206,7 @@ export async function findLiveRuns(gh: GitHub, config: ChatConfig, sources: read
   const live: LiveRun[] = [];
   for (const source of sources) {
     const base = `/repos/${source.repo}`;
-    const runs = await gh.get<{ workflow_runs: { id: number; run_attempt?: number; status: string; display_title: string }[] }>(
+    const runs = await gh.get<{ workflow_runs: { id: number; run_attempt?: number; status: string; display_title: string; created_at?: string; actor?: { login: string } }[] }>(
       `${base}/actions/workflows/${source.workflow}/runs?per_page=${RUNS_PER_PAGE}&exclude_pull_requests=true`);
     const found = runs.data.workflow_runs.slice(0, RUNS_PER_PAGE).filter((r) => Number.isSafeInteger(r.id) && LIVE_STATUSES.has(r.status));
     if (!found.length) continue;
@@ -200,9 +220,14 @@ export async function findLiveRuns(gh: GitHub, config: ChatConfig, sources: read
       // A run held as waiting or pending may still have its agent job up.
       const stage: RunStage = listed.phase === "preparing" && run.status !== "in_progress" ? { phase: "queued" } : listed;
       const named = publishedEndpoint(comments.data, source, url, config.tailnetDomain);
+      const items = [...new Set(comments.data.slice(-100).filter((c) => (c.user?.login === source.publisher || c.user?.login === OPERATOR) && typeof c.body === "string" && c.body.length <= MAX_COMMENT && c.body.match(/https:\/\/[^\s<>\x60)\]]+/g)?.some((u) => u === url))
+        .flatMap((c) => [
+          ...(c.body.match(/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+#[1-9]\d{0,9}(?!\d)/g) ?? []).map(publicItemRef),
+          ...(c.body.match(/https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/[1-9]\d{0,9}(?!\d)/g) ?? []).map((u) => chatItem(u, "")?.ref),
+        ]).filter((r): r is string => !!r))];
       const endpoint = stage.phase === "working" ? named ?? derivedEndpoint(run.id, attempt, config.tailnetDomain)
         : stage.phase === "preparing" || stage.phase === "queued" ? named : undefined;
-      live.push({ source, id: run.id, attempt, status: run.status, title: String(run.display_title ?? ""), url, stage, ...(endpoint ? { endpoint } : {}) });
+      live.push({ source, id: run.id, attempt, status: run.status, title: String(run.display_title ?? ""), url, stage, items, ...(run.created_at ? { createdAt: run.created_at } : {}), ...(run.actor ? { actor: run.actor.login } : {}), ...(endpoint ? { endpoint } : {}) });
     }
   }
   return live;
@@ -212,17 +237,23 @@ export async function findLiveRuns(gh: GitHub, config: ChatConfig, sources: read
  * Dispatch a source's workflow. GitHub answers 204, or 200 with the new
  * run's id when it chooses to say; the id is returned when given.
  */
-export async function dispatchSession(gh: GitHub, source: ChatSource): Promise<number | undefined> {
+export async function dispatchSession(gh: GitHub, source: ChatSource, item: ChatItem | undefined): Promise<number | undefined> {
   const path = `/repos/${source.repo}/actions/workflows/${source.workflow}/dispatches`;
   const ref = source.ref ?? DEFAULT_REF;
+  const inputs = sessionInputs(item);
+  // A reference to a private repository is private too; workflow inputs are public.
+  if (item) {
+    const visibility = await gh.get<{ private: boolean }>(`/repos/${item.ref.split("#")[0]!}`);
+    if (visibility.data.private !== false) throw new Error("Chat workflow prompts require a public repository reference.");
+  }
   try {
     let res: { workflow_run_id?: unknown } | undefined;
     try {
-      res = await gh.send("POST", path, { ref, return_run_details: true });
+      res = await gh.send("POST", path, { ref, inputs, return_run_details: true });
     } catch (e) {
       // A 422 dispatched nothing; it may be an API without return_run_details, so ask once more without it.
       if (!(e instanceof GitHubError && e.status === 422)) throw e;
-      res = await gh.send("POST", path, { ref });
+      res = await gh.send("POST", path, { ref, inputs });
     }
     const id = res?.workflow_run_id;
     return typeof id === "number" && Number.isSafeInteger(id) ? id : undefined;
@@ -300,33 +331,51 @@ const STATE_TEXT: Record<ChatState, string> = {
 };
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
+const CONFIGURED_ENDED = "Session ended. A new conversation needs the session server restarted; no transcript replay is available.";
 
 export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | undefined {
-  const config = "config" in options ? options.config : CHAT_CONFIG;
+  const sessions = options.sessions;
+  const config: ChatConfig | undefined = sessions ? { tailnetDomain: "", sources: [] } : "config" in options ? options.config : CHAT_CONFIG;
   if (!config) return undefined;
+  if (config.dispatch) return sessionDispatchPanel(gh, config.dispatch);
   const socketFactory = options.socketFactory ?? ((url: string) => new WebSocket(url));
   const t = { ...CHAT_TIMING, ...options.timing };
   let cleanup = () => {};
   let isAttached = () => false;
   let disposed = false;
-  return { dispose() { disposed = true; cleanup(); }, attached: () => !disposed && isAttached(), useGitHub(next) { gh = next; }, mount(slot) {
+  let open = (_item?: ChatItem) => {};
+  return { open(item) { open(item); }, dispose() { disposed = true; cleanup(); }, attached: () => !disposed && isAttached(), useGitHub(next) { gh = next; }, mount(slot) {
     if (disposed) return;
     const doc = slot.ownerDocument;
     const pane = h("section", { class: "chat-panel", "aria-label": "Session chat" });
+    const title = h("h2");
+    let item: ChatItem | undefined;
     const badge = h("span", { class: "chat-state" });
     const sourceSelect = h("select", { "aria-label": "Session workflow" }, ...config.sources.map((s, i) => h("option", { value: String(i) }, `${s.repo} ${s.workflow}`)));
     sourceSelect.hidden = config.sources.length < 2;
+    const provider = h("select", { "aria-label": "Provider" }, h("option", { value: "" }, "Choose provider"),
+      ...(sessions ?? []).map((s) => h("option", { value: s.id }, s.label)));
+    provider.hidden = !sessions?.length;
+    // TODO(cgwalters-forge/agentic-job#3616): offer fresh conversations only
+    // after the listener defines and advertises a capability for them.
     const start = h("button", { type: "button", class: "small primary" }, "Start session");
     const check = h("button", { type: "button", class: "small" }, "Check");
     const full = h("button", { type: "button", class: "small", "aria-pressed": "false" }, "Full screen");
     const disconnect = h("button", { type: "button", class: "small" }, "Disconnect");
+    const existing = h("button", { type: "button", class: "small" }, "Attach existing session");
+    const end = h("button", { type: "button", class: "small" }, "End run");
+    const close = h("button", { type: "button", class: "small" }, "Close drawer");
     const status = h("p", { class: "status chat-status", role: "status" });
     const runLink = h("a", { class: "chat-run", target: "_blank", rel: "noopener" });
     const log = h("div", { class: "chat-log", role: "log", "aria-live": "polite" });
     const input = h("textarea", { "aria-label": "Prompt", maxlength: "65536", rows: "3" });
     const send = h("button", { type: "submit", class: "primary" }, "Send");
     const cancel = h("button", { type: "button" }, "Cancel turn");
-    const form = h("form", { class: "chat-form" }, input, h("div", { class: "chat-bar" }, send, cancel));
+    // Answering is the only write here, and never a prompt: it posts on the item, not to the agent.
+    const answer = h("button", { type: "button" }, "Answer on GitHub");
+    const answerStatus = h("p", { class: "status", role: "status" });
+    const context = h("div", { class: "chat-context" });
+    const form = h("form", { class: "chat-form" }, input, h("div", { class: "chat-bar" }, send, cancel, answer), answerStatus);
     const body = h("div", { class: "chat-body" }, log, form);
 
     let state: ChatState = "none";
@@ -334,9 +383,12 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
     let armed = false;
     let run: LiveRun | undefined;
     /** Set while the run we wait for is one we dispatched: when, and its id once known. */
-    let dispatched: { at: number; id?: number } | undefined;
+    let dispatched: { at: number; source: ChatSource; id?: number; published?: boolean } | undefined;
     /** Runs whose session this tab ended or saw end: never attach to them again. */
     const finished = new Set<number>();
+    /** The pinned configured listener admits only one client, even after close. */
+    const consumed = new Set<string>();
+    let selectedProvider = "";
     let client: AcpClient | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let deadline = 0;
@@ -352,57 +404,122 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
     const tools = new Map<string, HTMLElement>();
     let current: HTMLElement | undefined;
     let currentKind = "";
+    /** The message being drawn, for its proposals: the chunks drawn, each whole, even the one that crossed the display budget. */
+    let currentText = "";
+    /** Proposals already carded in this transcript. */
+    const proposed = new Set<string>();
+    /** The item's ask as read for this drawer; sending it once, sent or uncertain, ends answering here. */
+    let answering: ChatAnswer | undefined;
+    let answerBusy = false;
+    let answered = false;
+    /** Opened once: a plain chat then counts as a context of its own. */
+    let seen = false;
 
-    const source = () => config.sources[Number(sourceSelect.value)] ?? config.sources[0]!;
+    /** Whether a run is about this drawer's item, or, for a plain chat, about none. */
+    const matches = (r: LiveRun) => item ? r.items.includes(item.ref) : !r.items.length;
+    const source =() => config.sources[Number(sourceSelect.value)] ?? config.sources[0]!;
     const schedule = (fn: () => void, ms: number) => { clearTimeout(timer); timer = setTimeout(fn, ms); };
     const say = (text: string) => { status.textContent = text; };
 
     const controls = () => {
+      const other = !!run && !matches(run) && run.id !== dispatched?.id;
       pane.dataset.state = state;
       badge.dataset.state = state;
       badge.textContent = state === "none" || armed || state === "connected" || state === "ended" ? STATE_TEXT[state] : `${STATE_TEXT[state]} · not attached`;
       const attachable = !armed && !client && run !== undefined && (state === "starting" || state === "waiting");
       start.textContent = attachable ? "Attach" : state === "ended" ? "Start again" : "Start session";
-      start.disabled = working || armed || !!client;
+      start.disabled = working || armed || !!client || other;
+      existing.hidden = !other || armed || !!client;
+      end.hidden = !run || !!client || state === "ended";
+      existing.disabled = end.disabled = working;
       check.disabled = working || armed || !!client;
       sourceSelect.disabled = armed || !!client;
+      if (sessions) {
+        start.textContent = "Attach";
+        start.hidden = consumed.has(provider.value);
+        start.disabled = !provider.value || consumed.has(provider.value) || armed || !!client;
+        check.hidden = sourceSelect.hidden = existing.hidden = end.hidden = true;
+        provider.disabled = armed || !!client;
+      }
       disconnect.hidden = state !== "connected";
       send.disabled = state !== "connected" || busy;
       cancel.disabled = state !== "connected" || !(busy || refused);
-      input.disabled = state !== "connected";
+      // A draft kept past its session stays editable, so it can be cleared.
+      input.disabled = state !== "connected" && !input.value && !answering;
+      answer.hidden = !item?.answer;
+      answer.disabled = !answering || answerBusy || answered;
       if (run) { runLink.href = run.url; runLink.textContent = `Run ${run.id}${run.title ? `: ${run.title}` : ""}`; runLink.hidden = false; }
       else runLink.hidden = true;
       body.hidden = state === "none" && !log.childElementCount && !pane.classList.contains("chat-full");
     };
     const go = (next: ChatState, text?: string) => { state = next; if (text !== undefined) say(text); controls(); };
 
+    /**
+     * s as far as the transcript's display budget goes, then a button that
+     * shows the rest on request: one oversized update can't flood the page,
+     * and its full text stays reachable.
+     */
+    const bounded = (s: string): [Text, ...HTMLElement[]] => {
+      const room = Math.max(0, TRANSCRIPT_CHARS - chars);
+      chars += Math.min(s.length, room);
+      if (s.length <= room) return [doc.createTextNode(s)];
+      const rest = s.slice(room);
+      const more = h("button", { type: "button", class: "chat-more" }, `Show ${rest.length.toLocaleString()} more characters`);
+      more.addEventListener("click", (e) => { e.preventDefault(); more.replaceWith(rest); });
+      return [doc.createTextNode(s.slice(0, room)), more];
+    };
+
     const render = (u: any) => {
-      if (!u || chars >= 1024 * 1024 || log.childElementCount >= 1000) { say("Transcript display limit reached"); return; }
-      const text = (v: unknown) => typeof v === "string" ? v.slice(0, 65536) : "";
+      if (!u || chars >= TRANSCRIPT_CHARS || log.childElementCount >= TRANSCRIPT_NODES) { say("Transcript display limit reached"); return; }
+      const text = (v: unknown) => typeof v === "string" ? v : "";
       let node: HTMLElement | undefined;
       if (u.sessionUpdate === "agent_message_chunk" || u.sessionUpdate === "user_message_chunk") {
         if (u.content?.type === "text") {
-          const chunk = text(u.content.text).slice(0, 1024 * 1024 - chars);
+          const chunk = text(u.content.text);
           if (!chunk) return;
-          if (!current || currentKind !== u.sessionUpdate) {
+          if (current && currentKind !== u.sessionUpdate) endMessage();
+          if (!current) {
             current = h("p", { class: u.sessionUpdate === "user_message_chunk" ? "chat-user" : "chat-agent" }); currentKind = u.sessionUpdate; log.append(current);
           }
+          currentText += chunk;
+          const [head, ...more] = bounded(chunk);
           const leaf = current.firstChild;
-          if (leaf) leaf.nodeValue = (leaf.nodeValue ?? "") + chunk;
-          else current.append(doc.createTextNode(chunk));
-          chars += chunk.length;
+          if (leaf) leaf.nodeValue = (leaf.nodeValue ?? "") + head.data;
+          else current.append(head);
+          current.append(...more);
         }
       } else if (u.sessionUpdate === "tool_call" || u.sessionUpdate === "tool_call_update") {
         const id = text(u.toolCallId);
         node = tools.get(id);
         if (!node) { node = h("details"); tools.set(id, node); }
-        node.replaceChildren(h("summary", {}, `${text(u.title) || "Tool"} · ${text(u.status)}`), h("pre", {}, text(JSON.stringify(u.content ?? u.rawOutput ?? ""))));
+        node.replaceChildren(h("summary", {}, ...bounded(`${text(u.title) || "Tool"} · ${text(u.status)}`)), h("pre", {}, ...bounded(text(JSON.stringify(u.content ?? u.rawOutput ?? "")))));
       } else if (u.sessionUpdate === "plan" && Array.isArray(u.entries)) {
-        node = h("ul", {}, ...u.entries.slice(0, 100).map((e: any) => h("li", {}, `${text(e.status)}: ${text(e.content)}`)));
+        node = h("ul", {}, ...u.entries.slice(0, 100).map((e: any) => h("li", {}, ...bounded(`${text(e.status)}: ${text(e.content)}`))));
       }
-      if (u.sessionUpdate !== "agent_message_chunk" && u.sessionUpdate !== "user_message_chunk") current = undefined;
-      if (node) { chars += node.textContent?.length ?? 0; if (!node.parentNode) log.append(node); }
+      if (u.sessionUpdate !== "agent_message_chunk" && u.sessionUpdate !== "user_message_chunk") endMessage();
+      if (node && !node.parentNode) log.append(node);
     };
+
+    /**
+     * Ends the message being drawn. After an agent's, a card for each
+     * operator-action proposal it fences; a proposal already carded is only
+     * noted. Cards are previews: nothing from the agent reaches a write.
+     */
+    function endMessage() {
+      const text = current && currentKind === "agent_message_chunk" ? currentText : "";
+      current = undefined; currentText = "";
+      for (const block of actionBlocks(text)) {
+        if (chars >= TRANSCRIPT_CHARS || log.childElementCount >= TRANSCRIPT_NODES) { say("Transcript display limit reached"); return; }
+        chars += Math.min(block.length, PROPOSAL_LIMIT);
+        // Agents reformat a proposal they repeat; its JSON value is what counts.
+        let key = block.trim();
+        try { key = JSON.stringify(JSON.parse(block)); } catch { /* Not JSON: compared as text. */ }
+        log.append(proposed.has(key) ? h("p", { class: "note chat-repeat" }, "Repeats a proposal shown above.") : chatProposalCard(block, ACTION_CONFIG));
+        proposed.add(key);
+      }
+    }
+
+    const clearLog = () => { log.replaceChildren(); chars = 0; tools.clear(); current = undefined; currentText = ""; proposed.clear(); };
 
     /**
      * The live run to show or attach to: the one already followed or
@@ -410,9 +527,29 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
      * queued behind it), else the newest.
      */
     const detect = async (): Promise<LiveRun | undefined> => {
-      const runs = (await findLiveRuns(gh, config, [source()])).filter((r) => !finished.has(r.id));
+      const runs = (await findLiveRuns(gh, config)).filter((r) => !finished.has(r.id));
       const want = run?.id ?? dispatched?.id;
-      return runs.find((r) => r.id === want) ?? runs.findLast((r) => r.status === "in_progress") ?? runs[0];
+      if (dispatched) {
+        const d = dispatched;
+        // Older APIs return only 204, naming no run. A new run by the operator
+        // may then be another tab's dispatch, so it is only offered, never
+        // pinned or associated: poll hands the choice to Attach existing session.
+        if (d.id === undefined) {
+          return runs.find((r) => r.source.repo === d.source.repo && r.source.workflow === d.source.workflow
+            && r.actor === OPERATOR && Date.parse(r.createdAt ?? "") >= Math.floor(d.at / 1000) * 1000);
+        }
+        const found = runs.find((r) => r.id === d.id);
+        if (found && !run) run = found;
+        if (found && item && !disposed && dispatched === d && !found.items.includes(item.ref)) {
+          // session.yml publishes the endpoint, not its prompt. Keep the item
+          // association on that same issue, as the operator, for future Attach.
+          if (!d.published) await gh.send("POST", `/repos/${found.source.repo}/issues/${found.source.issue}/comments`, { body: `Context: ${item.ref}.\n\nSession: ${found.url}` });
+          d.published = true;
+          found.items.push(item.ref);
+        }
+        return found;
+      }
+      return (armed || client ? runs.find((r) => r.id === want) : undefined) ?? runs.find(matches) ?? runs.findLast((r) => r.status === "in_progress") ?? runs[0];
     };
 
     /** Show what is live without attaching: on mount and on Check. */
@@ -424,7 +561,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
         if (gen !== generation || disposed) return;
         run = found;
         if (!found) go(state === "ended" ? "ended" : "none", state === "ended" ? status.textContent ?? "" : "No session is running. Start one to talk to it.");
-        else go(found.endpoint ? "waiting" : "starting", `A session run is ${found.status.replace("_", " ")}. ${found.stage.phase === "queued" ? "" : `${stageText(found)} `}Attach to talk to it; while attached, leaving or disconnecting ends it.`);
+        else go(found.endpoint ? "waiting" : "starting", !matches(found) ?"A session is live about another or unknown item. Attach existing session or end its run before starting another." : `A session run is ${found.status.replace("_", " ")}. ${found.stage.phase === "queued" ? "" : `${stageText(found)} `}Attach to talk to it; while attached, leaving or disconnecting ends it.`);
       } catch (e) { if (gen === generation) say(message(e)); }
       finally { if (gen === generation) { working = false; controls(); } }
     };
@@ -432,6 +569,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
     const endRun = (text: string) => {
       if (run) finished.add(run.id);
       armed = false; dispatched = undefined; clearTimeout(timer);
+      if (sessions) log.append(h("p", { class: "note" }, "Session ended"));
       go("ended", text);
     };
 
@@ -446,6 +584,11 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
       if (gen !== generation || disposed) return;
       if (read && run && found?.id !== run.id) {
         endRun("The run finished before its session could be reached.");
+        return;
+      }
+      if (found && dispatched && dispatched.id === undefined) {
+        armed = false; dispatched = undefined; run = found;
+        go(found.endpoint ? "waiting" : "starting", "GitHub didn't say which run this dispatch started, and another tab may have started one. If the linked run is yours, Attach existing session; otherwise Check again.");
         return;
       }
       if (found) {
@@ -478,6 +621,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
 
     const retry = (gen: number, why: string) => {
       if (gen !== generation || disposed) return;
+      if (sessions) { endRun(CONFIGURED_ENDED); return; }
       if (Date.now() > deadline) {
         armed = false;
         go("waiting", `Couldn't attach: ${why}. Check your tailnet login, then Attach to try again.`);
@@ -500,22 +644,31 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
     };
 
     const connect = (gen: number) => {
-      const endpoint = run?.endpoint;
+      const url = sessions && provider.value ? new URL(`/api/acp/${encodeURIComponent(provider.value)}`, doc.location.href) : undefined;
+      if (url) url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      const endpoint = url?.href ?? run?.endpoint;
       if (!endpoint || client || disposed) return;
-      log.replaceChildren(); chars = 0; tools.clear(); current = undefined; refused = false;
+      if (sessions) {
+        // No replay exists: retain ended conversations, clearly separated.
+        endMessage(); tools.clear();
+        log.append(h("p", { class: "note" }, `Provider: ${sessions.find((s) => s.id === provider.value)?.label ?? provider.value}`));
+      } else clearLog();
+      refused = false;
       let opened = false;
       let attached = false;
       let why = "connection failed";
       let socket: WebSocket;
+      if (sessions) consumed.add(provider.value);
       try { socket = socketFactory(endpoint); }
       catch (e) { retry(gen, message(e)); return; }
       const opening = setTimeout(() => { why = "timed out"; socket.close(); }, t.openTimeoutMs);
       const self = new AcpClient(socket, render, () => {
         clearTimeout(opening);
-        if (client === self) client = undefined;
+        if (client === self) { client = undefined; endMessage(); }
         busy = false;
         if (disposed) return;
-        if (attached) endRun("Disconnected. The session run ends when its client leaves; Start again for a new one.");
+        if (sessions) endRun(CONFIGURED_ENDED);
+        else if (attached) endRun("Disconnected. The session run ends when its client leaves; Start again for a new one.");
         // Once the socket was open, the bridge saw this client: a run whose client
         // leaves ends, and a bridge already serving another client closes unanswered.
         // Either way connecting again can't help.
@@ -534,31 +687,41 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
           if (client !== self) return;
           if (disposed || gen !== generation) { socket.close(); return; }
           attached = true; dispatched = undefined;
-          go("connected", "Attached. Leaving this page or disconnecting ends the session run.");
+          go("connected", sessions ? "Attached to the server's existing conversation. Leaving or disconnecting ends the session." : "Attached. Leaving this page or disconnecting ends the session run.");
           input.focus();
         } catch (e) { why = message(e); socket.close(); }
       };
-      socket.onerror = () => { why = "connection refused or not allowed"; };
+      socket.onerror = () => { why = "connection refused or not allowed"; if (sessions) socket.close(); };
       controls();
     };
 
     start.onclick = async () => {
       if (armed || client || disposed) return;
       const gen = ++generation;
+      if (sessions) {
+        if (!provider.value || consumed.has(provider.value)) return;
+        armed = true; go("waiting", "Connecting to the session…"); connect(gen); return;
+      }
       armed = true; working = true;
-      log.replaceChildren(); chars = 0; tools.clear(); current = undefined;
+      clearLog();
       go(state, "Looking for a live session run…");
       try {
         const found = await detect();
         if (gen !== generation || disposed) return;
         run = found;
+        if (found && !matches(found) && found.id !== dispatched?.id) {
+          armed = false;
+          go(found.endpoint ? "waiting" : "starting", "A session is already live. Attach existing session or end its run first.");
+          return;
+        }
         if (found?.endpoint) wait(gen);
         else if (found) startPolling(gen, `${stageText(found)} Not connecting yet: waiting for its session endpoint…`);
         else {
           const src = source();
-          const id = await dispatchSession(gh, src);
+          const at = Date.now();
+          const id = await dispatchSession(gh, src, item);
           if (gen !== generation || disposed) return;
-          dispatched = { at: Date.now(), ...(id !== undefined ? { id } : {}) };
+          dispatched = { at, source: src, ...(id !== undefined ? { id } : {}) };
           startPolling(gen, `Dispatched ${src.workflow} on ${src.repo}; waiting for the run to start…`);
         }
       } catch (e) {
@@ -569,14 +732,74 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
         if (gen === generation) { working = false; controls(); }
       }
     };
+    provider.onchange = () => {
+      if (input.value && provider.value !== selectedProvider) {
+        provider.value = selectedProvider;
+        say("Clear or copy the unsent draft before changing providers.");
+        controls(); return;
+      }
+      selectedProvider = provider.value;
+      controls();
+      if (client || armed || !provider.value) return;
+      if (consumed.has(provider.value)) go("ended", CONFIGURED_ENDED);
+      else start.click();
+    };
     check.onclick = () => void look();
+    existing.onclick = () => {
+      if (!run || working || armed || client) return;
+      const ref = run.items[0] ?? item?.ref;
+      if (ref !== item?.ref) {
+        // Another item's run: the card's ask, and answering it, stay with the card.
+        item = ref ? { ref, title: "" } : undefined;
+        answering = undefined; showContext();
+      }
+      title.textContent = run.title || `Run ${run.id}`;
+      // Explicitly attaching an unknown-context run must not dispatch another.
+      if (ref) run.items = [...run.items, ref];
+      armed = true;
+      const gen = ++generation;
+      if (run.endpoint) wait(gen); else startPolling(gen, "Waiting for the existing session…");
+    };
+    end.onclick = async () => {
+      if (!run || working || client || !confirm("End this live session run?")) return;
+      ++generation; clearTimeout(timer); armed = false;
+      working = true; controls();
+      try {
+        await gh.send("POST", `/repos/${run.source.repo}/actions/runs/${run.id}/cancel`);
+        dispatched = undefined;
+        say("Cancellation requested. Check again once the run ends.");
+      }
+      catch (e) { say(message(e)); }
+      finally { working = false; controls(); }
+    };
+    close.onclick = () => { setFull(false); slot.hidden = true; };
     disconnect.onclick = () => { if (client && confirm("Disconnect and end this session run?")) client.socket.close(); };
+    answer.onclick = async () => {
+      const a = answering;
+      const text = input.value;
+      if (!a || answerBusy || answered || !text.trim()
+        || !confirm(`Post this as your answer on ${a.target}${a.release ? ", then remove only its needs-human hold" : ""}? It is not sent to the agent.`)) return;
+      answerBusy = true; controls();
+      answerStatus.textContent = "Sending your answer…";
+      try {
+        const url = await a.send(text);
+        answered = true;
+        answerStatus.dataset.sent = "";
+        answerStatus.replaceChildren("Answered: ", h("a", { href: url, target: "_blank", rel: "noopener" }, url));
+        if (input.value === text) input.value = "";
+      } catch (e) {
+        // A write that may have gone out is not offered again; one refused before sending is.
+        if (e instanceof MaybeSentError) answered = true;
+        answerStatus.textContent = e instanceof MaybeSentError ? `Not sent, or uncertain: ${message(e)}` : `Not sent: ${message(e)}`;
+      }
+      answerBusy = false; controls();
+    };
     cancel.onclick = () => { try { client?.cancel(); refused = false; say("Cancel sent"); } catch (e) { say(message(e)); } controls(); };
     form.onsubmit = async (event) => {
       event.preventDefault();
       const c = client;
       if (disposed || state !== "connected" || !c?.sessionId || busy || !input.value.trim()) return;
-      current = undefined;
+      endMessage();
       busy = true; controls();
       const prompt = input.value;
       say("Turn running…");
@@ -588,6 +811,7 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
       } catch (e) {
         if (client === c) { refused = true; say(`Prompt refused: ${message(e)}. A turn may still be running; Cancel turn stops it.`); }
       }
+      if (client === c) endMessage();
       busy = false; controls();
     };
 
@@ -596,18 +820,17 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
     // on the hidden page); typing and buttons keep their default actions.
     // The pane has no key handlers of its own. Otherwise keys are left alone.
     const onKey = (ev: KeyboardEvent) => {
-      if (!pane.classList.contains("chat-full")) return;
+      if (slot.hidden || (!pane.classList.contains("chat-full") && !pane.contains(ev.target as Node))) return;
       ev.stopPropagation();
       if (ev.key !== "Escape" || ev.isComposing) return;
       ev.preventDefault();
-      setFull(false);
+      if (pane.classList.contains("chat-full")) setFull(false);
+      else slot.hidden = true;
     };
     const setFull = (on: boolean) => {
       pane.classList.toggle("chat-full", on);
       full.setAttribute("aria-pressed", String(on));
       full.textContent = on ? "Exit full screen" : "Full screen";
-      if (on) doc.addEventListener("keydown", onKey, true);
-      else doc.removeEventListener("keydown", onKey, true);
       controls();
     };
     full.onclick = () => setFull(!pane.classList.contains("chat-full"));
@@ -622,17 +845,65 @@ export function chatPanel(gh: GitHub, options: ChatOptions = {}): ChatPanel | un
       clearTimeout(timer);
       doc.removeEventListener("keydown", onKey, true);
       win?.removeEventListener("beforeunload", onUnload);
+      doc.removeEventListener(ITEM_CHAT_EVENT, onItem);
       client?.socket.close(); client = undefined;
       slot.replaceChildren(); slot.hidden = true;
     };
 
     pane.append(
-      h("div", { class: "chat-head" }, h("h2", {}, "Session chat"), badge),
-      h("div", { class: "chat-bar" }, sourceSelect, start, check, full, disconnect),
-      h("p", { class: "note" }, "Uses your tailnet login, never your GitHub token. One client per session: leaving or disconnecting ends the run."),
-      status, runLink, body,
+      h("div", { class: "chat-head" }, title, badge, close),
+      h("div", { class: "chat-bar" }, provider, sourceSelect, start, check, full, disconnect, existing, end),
+      h("p", { class: "note" }, sessions ? "Uses the configured service bridge, never your GitHub token. No automatic reconnect or transcript replay." : "Uses your tailnet login, never your GitHub token. One client per session: leaving or disconnecting ends the run."),
+      status, runLink, context, body,
     );
-    slot.replaceChildren(pane); controls();
-    void look();
+    /** The item, what its card asks (as read now, for an answer) and its public links. */
+    function showContext() {
+      const links = item ? itemLinks(item) : [];
+      context.replaceChildren(
+        ...(item ? [h("p", {}, item.ref, item.ask ? ` · ${item.ask}` : "")] : []),
+        ...(answering ? [h("p", { class: "chat-ask" }, answering.ask)] : []),
+        ...(links.length ? [h("p", {}, ...links.flatMap((u, i) => [i ? " " : "", h("a", { href: u, target: "_blank", rel: "noopener" }, u)]))] : []));
+    }
+    /** Read the card's ask for this drawer: what an answer is checked against. */
+    const readAnswer = async (about: ChatItem) => {
+      answering = undefined; answered = false; answerStatus.replaceChildren(); delete answerStatus.dataset.sent;
+      if (!about.answer) return;
+      answerStatus.textContent = "Reading its ask…";
+      try {
+        const read = await about.answer();
+        if (item !== about || disposed) return;
+        answering = read; answerStatus.textContent = "";
+      } catch (e) { if (item === about) answerStatus.textContent = `Can't answer from here: ${message(e)}`; }
+      showContext(); controls();
+    };
+    open = (next) => {
+      if (disposed || (next && !publicItemRef(next.ref))) return;
+      slot.hidden = false;
+      const ref = next && publicItemRef(next.ref);
+      const fresh = !seen || item?.ref !== ref;
+      const about = next ? "another item" : "nothing in particular";
+      if (fresh && (armed || client || dispatched)) {
+        say(`Finish or disconnect the current session before chatting about ${about}. Your draft is kept.`);
+      } else if (fresh && input.value.trim()) {
+        controls();
+        say(`Copy or clear your unsent draft before chatting about ${about}.`);
+      } else {
+        // The same card again shows its context as drawn now, and reads its ask
+        // again unless an answer went out or is going.
+        const reread = fresh || (!answered && !answerBusy);
+        seen = true;
+        item = next && { ...next, ref: ref! };
+        title.textContent = next?.title ?? "Chat";
+        if (reread && item) void readAnswer(item);
+        else if (reread) { answering = undefined; answerStatus.replaceChildren(); }
+        showContext();
+        if (fresh) { run = undefined; if (!sessions) void look(); }
+      }
+      start.focus();
+    };
+    const onItem = (event: Event) => open((event as CustomEvent<ChatItem | undefined>).detail ?? undefined);
+    if (!sessions) doc.addEventListener(ITEM_CHAT_EVENT, onItem);
+    doc.addEventListener("keydown", onKey, true);
+    slot.replaceChildren(pane); slot.hidden = true; controls();
   } };
 }

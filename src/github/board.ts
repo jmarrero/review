@@ -42,6 +42,9 @@ export interface RawContent {
   state?: string;
   draft?: boolean;
   merged_at?: string | null;
+  closed_at?: string | null;
+  /** Why an issue was closed: completed, not_planned, duplicate, reopened. */
+  state_reason?: string | null;
   updated_at?: string;
   created_at?: string;
   user?: RawUser | null;
@@ -126,12 +129,21 @@ export interface Item {
   /** When the board item itself (a field) last changed. */
   movedAt?: string;
   updatedAt?: string;
+  /** When its issue was closed or its PR merged, and why an issue was closed (the API's state_reason). */
+  closedAt?: string;
+  closedAs?: string;
 }
 
 /** The priorities in queue order; anything else sorts after them. */
 export const PRIORITY_ORDER: readonly string[] = ["P0", "P1", "P2", "P3"];
 /** Group heading for items with no priority. */
 export const NO_PRIORITY = "No priority";
+
+/** Rank in PRIORITY_ORDER; anything else, none included, ranks after it. */
+export function priorityIndex(p: string | undefined): number {
+  const i = PRIORITY_ORDER.indexOf(p ?? NO_PRIORITY);
+  return i < 0 ? PRIORITY_ORDER.length : i;
+}
 
 const ISSUE_URL_RE = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/(\d+)$/;
 const API_ISSUE_URL_RE = /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/issues\/(\d+)$/;
@@ -259,6 +271,8 @@ export function parseItem(raw: RawItem): Item {
     item.url = c.html_url;
     opt("ref", parseIssueUrl(c.html_url));
     opt("state", c.merged_at ? "merged" : c.state);
+    opt("closedAt", c.merged_at ?? c.closed_at ?? undefined);
+    opt("closedAs", c.state_reason ?? undefined);
   }
   if (c.user?.login) item.author = c.user.login;
   if (typeof c.comments === "number") item.comments = c.comments;
@@ -352,11 +366,6 @@ export function askProblem(q: AskFacts, want?: AskKind, scope: AskScope = TRACKE
   if (!q.assignees.some((a) => a.toLowerCase() === scope.assignee.toLowerCase())) return `${where} is not assigned to ${scope.assignee}`;
   if (q.state !== "open") return `${where} is closed`;
   return undefined;
-}
-
-/** Why a question can't take an answer; see askProblem. */
-export function questionProblem(q: AskFacts, scope: AskScope = TRACKER_SCOPE): string | undefined {
-  return askProblem(q, "question", scope);
 }
 
 /** An ask issue in the tracker, open or closed, of any kind. */

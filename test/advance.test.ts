@@ -3,24 +3,18 @@ import { describe, it } from "node:test";
 import {
   type AdvanceFacts,
   decideAdvance,
-  decisionStops,
   EDITED_ATTR,
   overlayVerdicts,
   overlayWaiting,
   type PendingVerdict,
   pickNext,
-  queueStops,
   stillReviewed,
   type Stop,
-  triageStops,
   writingElsewhere,
 } from "../src/github/advance.ts";
-import { parseItem } from "../src/github/board.ts";
-import { parseDecision } from "../src/github/triage.ts";
 import { OPTIMISTIC_TTL_MS } from "../src/github/config.ts";
 import type { VerdictEntry, WaitingPr } from "../src/github/prs.ts";
-import type { Entry } from "../src/github/queue.ts";
-import { installDom, rawBoardItem } from "./helpers.ts";
+import { installDom } from "./helpers.ts";
 
 const stop = (key: string, waiting = true): Stop => ({ key, href: `#item/${key}`, title: key, waiting });
 const stops = (spec: string) => spec.split(" ").filter(Boolean).map((k) => (k.endsWith("~") ? stop(k.slice(0, -1), false) : stop(k)));
@@ -42,33 +36,6 @@ describe("pickNext", () => {
   for (const [name, from, current, now, want] of cases) {
     it(name, () => assert.equal(pickNext(stops(from), current, stops(now))?.key, want));
   }
-
-  it("follows a filtered queue, children after their parent, skipping settled asks", () => {
-    const e = (key: string, priority: string, over: Partial<Entry> = {}): Entry => ({ key, kind: "item", title: key, where: "w", href: `#${key}`, priority, ...over });
-    const entries = [
-      e("p0-a", "P0", { children: [e("p0-a-ask", "P0", { kind: "question" }), e("p0-a-done", "P0", { kind: "question", settled: true })] }),
-      e("p1-a", "P1"),
-      e("p0-b", "P0"),
-      e("p0-c", "P0", { kind: "question", settled: true }),
-    ];
-    const p0 = queueStops(entries, { scope: "all", priority: "P0" });
-    assert.deepEqual(
-      p0.map((s) => `${s.key}${s.waiting ? "" : "~"}`),
-      ["p0-a", "p0-a-ask", "p0-a-done~", "p0-b", "p0-c~"],
-    );
-    assert.equal(pickNext(p0, "p0-a-ask", p0)?.key, "p0-b", "past the settled child, and never into the P1 row the filter hides");
-    assert.equal(pickNext(p0, "p0-b", p0)?.key, "p0-a", "wraps within the filter");
-    assert.equal(pickNext(p0, "p0-b", p0.filter((s) => s.key === "p0-b"))?.key, undefined);
-    assert.equal(queueStops(entries, { scope: "all" }).length, 6);
-  });
-
-  it("lists the bot's turns without stopping there", () => {
-    const pr = (key: string, onBot: boolean): Entry => ({ key, kind: "pr", title: key, where: "w", href: `#pr/${key}`, wait: { reasons: onBot ? [] : ["review-requested"], onBot } });
-    const s = queueStops([pr("a", false), pr("b", true), pr("c", false)], { scope: "all" });
-    assert.deepEqual(s.map((x) => x.waiting), [true, false, true]);
-    assert.equal(pickNext(s, "a", s)?.key, "c");
-    assert.equal(pickNext(s, "c", s.slice(1, 3).map((x) => ({ ...x, waiting: false })))?.key, undefined, "caught up with only the bot's turns left");
-  });
 });
 
 describe("decideAdvance", () => {
@@ -202,44 +169,6 @@ describe("overlayWaiting", () => {
   // A requested forge draft is listed here, and the queue takes this verdict over overlayVerdicts'.
   it("shows his change request as the verdict before a read does", () => {
     assert.deepEqual(overlayWaiting([{ ...waiting(1), verdict: { state: "none" } }], pending("changes-requested"), T + 1000)[0]?.verdict, { state: "changes-requested" });
-  });
-});
-
-describe("triageStops and decisionStops", () => {
-  const item = (n: number) => parseItem(rawBoardItem(n, { Status: "Needs human" }));
-  const entry = (n: number, over: Partial<Entry> = {}): Entry => ({ key: `item:PVTI_t${n}`, kind: "item", title: `item ${n}`, where: "w", href: `#item/PVTI_t${n}`, ...over });
-
-  it("keeps the triage order, only for rows opening in the app, waiting as their queue row says", () => {
-    const entries = [entry(3, { children: [entry(4, { kind: "question", settled: true })] }), entry(1)];
-    // 5 opens in the app without a row of its own (folded into its PR's), and is done from here; 6 likewise, not done.
-    const links = { opens: (i: { nodeId: string }) => (i.nodeId === "PVTI_t2" ? undefined : `#item/${i.nodeId}`), settled: (i: { nodeId: string }) => i.nodeId === "PVTI_t5" };
-    const got = triageStops([item(1), item(2), item(4), item(5), item(3), item(6)], entries, links);
-    assert.deepEqual(
-      got.map((s) => [s.key, s.href, s.waiting]),
-      [
-        ["item:PVTI_t1", "#item/PVTI_t1", true],
-        ["item:PVTI_t4", "#item/PVTI_t4", false],
-        ["item:PVTI_t5", "#item/PVTI_t5", false],
-        ["item:PVTI_t3", "#item/PVTI_t3", true],
-        ["item:PVTI_t6", "#item/PVTI_t6", true],
-      ],
-    );
-    // From 1, the next still waiting is 3: 2 opens on GitHub, 4 and 5 are settled.
-    assert.equal(pickNext(got, "item:PVTI_t1", got)?.key, "item:PVTI_t3");
-    assert.equal(pickNext(got, "item:PVTI_t3", got)?.key, "item:PVTI_t6");
-  });
-
-  it("steps through the decisions in place, skipping answered ones", () => {
-    const withRef = (n: number) => ({ ...item(n), ref: { owner: "jmarrero-forge", repo: "tracker", number: n } });
-    const ds = [7, 8, 9].map((n) => parseDecision({ ...withRef(n), title: `D${n}: pick` }));
-    const answered = new Set(["PVTI_t8"]);
-    const got = decisionStops(ds, answered, "#decisions");
-    assert.deepEqual(got.map((s) => [s.key, s.href, s.title, s.waiting]), [
-      ["decision:PVTI_t7", "#decisions", "D7: pick", true],
-      ["decision:PVTI_t8", "#decisions", "D8: pick", false],
-      ["decision:PVTI_t9", "#decisions", "D9: pick", true],
-    ]);
-    assert.equal(pickNext(got, "decision:PVTI_t7", got)?.key, "decision:PVTI_t9");
   });
 });
 

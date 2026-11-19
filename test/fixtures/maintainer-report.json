@@ -1,0 +1,18 @@
+{
+  "schema": "agent-board/maintainer-report/v1",
+  "generated_at": "2026-11-05T12:00:00Z",
+  "mode": "preview",
+  "repositories": ["example/project", "example/unread"],
+  "pull_requests": {
+    "wait": [{"repository": "example/project", "number": 12, "head": "abc", "action": "wait", "reason": "Waiting for approval", "ran": false}],
+    "merge": [{"repository": "example/project", "number": 13, "head": "def", "action": "merge", "reason": "Ready", "ran": true}]
+  },
+  "merge_queue_events": [{"repository": "example/project", "number": 12, "event": {"id": null, "created_at": null, "reason": "failed_checks"}, "step": {"repository": "example/project", "number": 12, "head": "abc", "action": "wait", "reason": "Waiting for approval", "ran": false}}],
+  "merge_queues": {"example/project": [
+    {"number": 13, "head": "def", "position": 1, "state": "AWAITING_CHECKS"},
+    {"number": null, "head": null, "position": null, "state": null}
+  ]},
+  "needs_human": [{"repository": "example/project", "number": 12, "head": "abc", "kind": "approve", "reason": "Please review"}],
+  "undecided_repositories": ["example/unread"],
+  "errors": 0
+}

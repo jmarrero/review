@@ -1,0 +1,11 @@
+[
+  {
+    "id": 30,
+    "html_url": "https://github.com/jmarrero-forge/bot-ops/issues/1#issuecomment-30",
+    "user": {
+      "login": "jmarrero-bot"
+    },
+    "updated_at": "2026-10-26T03:10:00Z",
+    "body": "<!-- bot-usage v1 -->\nUsage, published by `agent-board pass`.\n\n```json\n{\n  \"schema\": \"bot-usage/v1\",\n  \"updated_at\": \"2026-10-26T03:10:00Z\",\n  \"pools\": {\n    \"claude\": {\n      \"source\": \"praxis\",\n      \"observed_at\": \"2026-10-26T03:05:00Z\",\n      \"computed_at\": \"2026-10-26T03:10:00Z\",\n      \"used_percent\": 41,\n      \"window_minutes\": 10080,\n      \"resets_at\": \"2026-10-30T23:00:00Z\",\n      \"target_percent\": 95,\n      \"burst\": 3,\n      \"allowed_percent\": 40.2,\n      \"limit_percent\": 43.2,\n      \"ahead\": 0.8,\n      \"hold\": false,\n      \"reason\": null,\n      \"next_dispatch_at\": null\n    },\n    \"openai\": {\n      \"source\": \"praxis\",\n      \"computed_at\": \"2026-10-26T03:10:00Z\",\n      \"hold\": true,\n      \"reason\": \"no-reading\",\n      \"next_dispatch_at\": null\n    },\n    \"fable\": {\n      \"source\": \"praxis\",\n      \"observed_at\": \"2026-10-26T03:05:00Z\",\n      \"computed_at\": \"2026-10-26T03:10:00Z\",\n      \"used_percent\": 52,\n      \"window_minutes\": 10080,\n      \"resets_at\": \"2026-10-30T23:00:00Z\",\n      \"target_percent\": 95,\n      \"burst\": 3,\n      \"allowed_percent\": 40.2,\n      \"limit_percent\": 43.2,\n      \"ahead\": 11.8,\n      \"hold\": true,\n      \"reason\": \"pace\",\n      \"next_dispatch_at\": \"2026-10-27T05:42:00Z\"\n    }\n  },\n  \"mistral\": {\n    \"requests\": 2500,\n    \"tokens\": 1234567,\n    \"observed_at\": \"2026-10-26T03:10:00Z\"\n  }\n}\n```\n"
+  }
+]

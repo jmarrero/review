@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ALL } from "../src/github/filter.ts";
-import { type ActionJson, age, type EntryJson, printable, type QueueJson, SCHEMA, suggestedAction } from "../src/github/export.ts";
+import { type ActionJson, age, type EntryJson, printable, type QueueJson, SCHEMA, suggestedAction } from "../src/cli/export.ts";
 import type { Entry } from "../src/github/queue.ts";
 import type { PrWait } from "../src/github/waiting.ts";
 import { type Io, parseArgs, readOnly, run, tokenFrom, UsageError } from "../src/cli/queue.ts";
@@ -166,6 +166,19 @@ describe("review-queue --json", () => {
     assert.equal(r.stdout, "");
     assert.equal(r.stderr, "review-queue: GitHub refused the token (HTTP 401); check $GH_TOKEN/$GITHUB_TOKEN, or `gh auth status`; the token needs read:project for the board\n");
   });
+
+  for (const body of [{}, { items: [], total_count: 0, incomplete_results: true }]) {
+    it(`preserves board entries and warns when PR search coverage is unknown: ${JSON.stringify(body)}`, async () => {
+      const r = await runCli(["--json"], (m, url) => url.includes("/search/") ? { body } : world(m, url));
+      assert.equal(r.status, 0);
+      const doc = JSON.parse(r.stdout) as QueueJson;
+      assert.equal(doc.warnings.length, 2);
+      assert.ok(doc.warnings.every((warning) => warning.includes("PR search")));
+      assert.ok(doc.entries.some((entry) => entry.kind !== "pr"));
+      assert.ok(!doc.entries.some((entry) => entry.kind === "pr"));
+      assert.match(r.stderr, /warning: couldn't read the forge's PRs/);
+    });
+  }
 });
 
 describe("review-queue: whose turn a PR is", () => {

@@ -3,6 +3,7 @@ name: ci
 
 on:
   pull_request:
+  merge_group: {types: [checks_requested]}
   push:
     branches: [main]
 
@@ -24,6 +25,9 @@ jobs:
       # ubuntu-latest), which `just lint` runs locally. A step here rather
       # than a job of its own, so that it gates merges like the rest.
       - uses: cgwalters-forge/actions/lint@main
+      # The control app service (service/README.md), with the runner's Rust.
+      - working-directory: service
+        run: cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
       # Until the app lands, main has no package.json and nothing to check.
       - if: hashFiles('package-lock.json') != ''
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -32,3 +36,15 @@ jobs:
           cache: npm
       - if: hashFiles('package-lock.json') != ''
         run: npm ci && npm run check
+      # The browser test against the fixtures, in Playwright's own Chromium
+      # (test/browser/app.spec.ts); --with-deps installs its system libraries.
+      - if: hashFiles('package-lock.json') != ''
+        run: npx playwright install --with-deps chromium && npm run test:browser
+      # Its fixture-data screenshots, for a PR whose author could not attach them.
+      - if: always() && hashFiles('package-lock.json') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots
+          path: dist/screenshots
+          if-no-files-found: ignore
+          retention-days: 14

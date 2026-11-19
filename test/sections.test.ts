@@ -28,28 +28,27 @@ function withStorage<T>(storage: unknown, body: () => T): T {
 }
 
 describe("sections", () => {
-  it("are, in order, what needs him, the agents, the changes, everything by priority, and the usage", () => {
-    assert.deepEqual(SECTIONS.map((id) => SECTION_TITLE[id]), ["Decisions", "Agents", "Changes", "By priority", "Usage"]);
-    assert.ok(isSection("usage"));
+  it("has only the Needs you section", () => {
+    assert.deepEqual(SECTIONS.map((id) => SECTION_TITLE[id]), ["Needs you"]);
+    assert.ok(isSection("needs"));
+    assert.ok(!isSection("usage"));
     assert.ok(!isSection("ops"));
   });
 
   it("open by default only while they need him, and as he left them otherwise", () => {
     assert.equal(sectionOpen("needs", {}, true), true);
     assert.equal(sectionOpen("needs", {}, false), false);
-    assert.equal(sectionOpen("agents", {}, false), false);
     assert.equal(sectionOpen("needs", { needs: false }, true), false, "he closed it");
-    assert.equal(sectionOpen("priority", { priority: true }, false), true, "he opened it");
+    assert.equal(sectionOpen("needs", { needs: true }, false), true, "he opened it");
   });
 
   it("remember what he opened or closed, tolerate junk, and work without storage", () => {
     withStorage(new MemStorage(), () => {
       assert.deepEqual(loadSectionPrefs(), {});
-      saveSectionPref("changes", true);
+      saveSectionPref("needs", true);
+      assert.deepEqual(loadSectionPrefs(), { needs: true });
       saveSectionPref("needs", false);
-      assert.deepEqual(loadSectionPrefs(), { changes: true, needs: false });
-      saveSectionPref("changes", false);
-      assert.deepEqual(loadSectionPrefs(), { changes: false, needs: false });
+      assert.deepEqual(loadSectionPrefs(), { needs: false });
     });
     for (const junk of ['{"ops":true}', '{"needs":"yes"}', "[true]", "nonsense"]) {
       const storage = new MemStorage();
@@ -57,7 +56,7 @@ describe("sections", () => {
       withStorage(storage, () => assert.deepEqual(loadSectionPrefs(), {}, junk));
     }
     withStorage(undefined, () => {
-      saveSectionPref("usage", true);
+      saveSectionPref("needs", true);
       assert.deepEqual(loadSectionPrefs(), {});
     });
   });

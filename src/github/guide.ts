@@ -211,8 +211,3 @@ export function worst(hs: readonly Hotspot[]): Severity | undefined {
   for (const h of hs) if (out === undefined || SEVERITY_RANK[h.severity] < SEVERITY_RANK[out]) out = h.severity;
   return out;
 }
-
-/** Whether a skim entry covers the whole file. */
-export function skimsWholeFile(s: Skim): boolean {
-  return s.start === undefined;
-}

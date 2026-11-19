@@ -15,6 +15,12 @@ lint actions=env("FORGE_ACTIONS", justfile_directory() / ".." / "actions"):
 check:
     npm run check
 
+# The control app service's tests and lints (service/README.md)
+check-service:
+    cargo fmt --check --manifest-path service/Cargo.toml
+    cargo clippy --manifest-path service/Cargo.toml --all-targets --locked -- -D warnings
+    cargo test --manifest-path service/Cargo.toml --locked
+
 # Narrow operator-action tests
 test-actions:
     node --test test/actions.test.ts

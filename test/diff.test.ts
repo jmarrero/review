@@ -7,6 +7,7 @@ import {
   type Item,
   isGenerated,
   languageFor,
+  lineDiff,
   type LineRange,
   pairs,
   parseHunks,
@@ -81,6 +82,22 @@ describe("wordDiff", () => {
   it("gives up on very long lines", () => {
     const long = "x ".repeat(600);
     assert.deepEqual(wordDiff(long, `${long}y`), { old: [], new: [] });
+  });
+});
+
+describe("lineDiff", () => {
+  const kinds = (d: { kind: string; text: string }[]) => d.map((l) => `${l.kind} ${l.text}`);
+  it("keeps, adds and deletes lines", () => {
+    assert.deepEqual(kinds(lineDiff("a\nb\nc", "a\nx\nc")), ["same a", "add x", "del b", "same c"]);
+    assert.deepEqual(kinds(lineDiff("same\r\n", "same")), ["same same"]);
+    assert.deepEqual(kinds(lineDiff("a", "a\nb")), ["same a", "add b"]);
+    assert.deepEqual(kinds(lineDiff("(none)", "{\n}")), ["add {", "add }", "del (none)"]);
+  });
+  it("shows a middle too large to compare as replaced whole, keeping the common ends", () => {
+    const lines = (p: string) => Array.from({ length: 1001 }, (_, i) => `${p}${i}`).join("\n");
+    const d = lineDiff(`top\n${lines("a")}\nend`, `top\n${lines("b")}\nend`);
+    assert.equal(d.length, 2004);
+    assert.deepEqual(kinds([d[0]!, d[1]!, d[1002]!, d.at(-1)!]), ["same top", "del a0", "add b0", "same end"]);
   });
 });
 

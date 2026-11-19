@@ -4,7 +4,7 @@
 // them with a scripted fetch.
 
 import { type Answer, formatAnswer, formatComment, parseQuestion } from "../answer.ts";
-import { type GitHub, GitHubError } from "./api.ts";
+import { type GitHub, GitHubError, ReadOnlyError } from "./api.ts";
 import {
   failedJobs,
   parseAskBody,
@@ -42,10 +42,11 @@ import {
   type SubIssueSummary,
   TRACKER_SCOPE,
 } from "./board.ts";
-import { BOARD_NUMBER, BOARD_OWNER, BOT_LOGIN, QUESTION_LABEL, DONE, FETCH_CONCURRENCY, LINKED_STATUSES, PAGE_SIZE, QUEUE_STATUSES, RECENT_COMMENTS, TRACKER_REPO } from "./config.ts";
-import { refKey } from "./forge.ts";
-import { mapLimit, submitReview } from "./prs.ts";
-import type { ReviewRequest } from "./forge.ts";
+import { BOARD_NUMBER, BOARD_OWNER, BOT_LOGIN, OPERATOR, QUESTION_LABEL, DONE, FETCH_CONCURRENCY, LINKED_STATUSES, PAGE_SIZE, QUEUE_STATUSES, RECENT_COMMENTS, TRACKER_REPO } from "./config.ts";
+import { promoteProblem, refKey } from "./forge.ts";
+import { mapLimit, readHeadCi, submitReview } from "./prs.ts";
+import type { CiState, ReviewRequest } from "./forge.ts";
+import { approveHead, approveSelected, type ApproveResult } from "./maintain.ts";
 
 const PROJECT = `/orgs/${BOARD_OWNER}/projectsV2/${BOARD_NUMBER}`;
 
@@ -62,9 +63,8 @@ export interface ProjectStatus {
 /** Project updates are available through GraphQL, independently of board items. */
 export async function loadProjectStatus(gh: GitHub): Promise<ProjectStatus | null> {
   const query = `query { organization(login: "${BOARD_OWNER}") { projectV2(number: ${BOARD_NUMBER}) { statusUpdates(first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { body createdAt } } } } }`;
-  const result = await gh.send<{ data?: { organization?: { projectV2?: { statusUpdates: { nodes: ProjectStatus[] } } } }; errors?: { message: string }[] }>("POST", "/graphql", { query });
-  if (result.errors?.length) throw new Error(result.errors.map((e) => e.message).join("; "));
-  const updates = result.data?.organization?.projectV2?.statusUpdates.nodes;
+  const result = await gh.graphql<{ organization?: { projectV2?: { statusUpdates: { nodes: ProjectStatus[] } } } }>(query);
+  const updates = result.organization?.projectV2?.statusUpdates.nodes;
   if (!updates) throw new Error("the project's status updates could not be read");
   return updates[0] ?? null;
 }
@@ -283,6 +283,73 @@ export async function viewer(gh: GitHub): Promise<string> {
 }
 
 /**
+ * Run an Inbox card's `write` only under the operator's own token, as
+ * GitHub names it now: the page's login may be unconfirmed or stale, and
+ * another token's approval or answer would count for nothing, or for
+ * someone else.
+ */
+export async function asOperator<T>(gh: GitHub, write: () => Promise<T>): Promise<T> {
+  const { login } = await gh.send<{ login: string }>("GET", "/user");
+  if (login.toLowerCase() !== OPERATOR.toLowerCase()) throw new Error(`this token is ${login}'s, not ${OPERATOR}'s; nothing was sent`);
+  return write();
+}
+
+/** Read the exact target, not a transferred issue, before showing or answering its ask. */
+export async function readAnswerTarget(gh: GitHub, item: string): Promise<RawContent> {
+  const [owner = "", repo = "", n] = item.split(/[/#]/);
+  const issue = await gh.send<RawContent>("GET", `/repos/${owner}/${repo}/issues/${Number(n)}`);
+  const actual = parseIssueUrl(issue.html_url ?? "");
+  if (!actual || refKey(actual).toLowerCase() !== item.toLowerCase() || issue.state !== "open") throw new Error(`not answering: ${item} is ${issue.state === "open" ? `now ${issue.html_url}` : issue.state ?? "not open"}`);
+  return issue;
+}
+
+/** Answer only the ask shown. A comment never releases arbitrary pass holds. */
+export async function answerHold(gh: GitHub, item: string, text: string, shown: RawContent, release = false, check?: () => Promise<void>): Promise<Posted> {
+  const [owner = "", repo = "", n] = item.split(/[/#]/);
+  const ref = { owner, repo, number: Number(n) };
+  const body = formatComment(text);
+  const issue = await readAnswerTarget(gh, item);
+  const identity = (i: RawContent) => JSON.stringify([i.title, i.body, labelNames(i.labels).sort(), assigneeLogins(i.assignees).sort(), i.user?.login, !!i.pull_request]);
+  const same = (now: RawContent) => {
+    if (release && !labelNames(now.labels).includes("needs-human")) throw new Error("The intended needs-human hold is no longer present");
+    if (identity(now) !== identity(shown)) throw new Error("The ask changed; not answering or releasing it. Reload and read it again.");
+  };
+  same(issue);
+  await check?.();
+  // ask-created tracker questions may be closed, not arbitrary held work.
+  // Never follow editable Blocks: text to unlabel a different target here.
+  const question = parseQuestion(issue.body ?? "");
+  const close = release && question.blocks !== undefined && askProblem({
+    kind: issue.pull_request ? "pr" : "issue", ref, state: issue.state ?? "",
+    labels: labelNames(issue.labels), assignees: assigneeLogins(issue.assignees), author: issue.user?.login ?? "",
+  }, "question") === undefined;
+  if (close) {
+    const board = await loadWholeBoard(gh);
+    if (!board.items.some((i) => i.ref && refKey(i.ref).toLowerCase() === item.toLowerCase())) throw new Error("The question is no longer on the board; not resolving it");
+  }
+  let posted: Posted;
+  try {
+    posted = await comment(gh, ref, body);
+    const receipt = typeof posted.url === "string" ? /^(.*)#issuecomment-[1-9][0-9]*$/.exec(posted.url) : null;
+    const target = receipt ? parseIssueUrl(receipt[1]!) : undefined;
+    if (!target || refKey(target).toLowerCase() !== item.toLowerCase()) throw new Error("GitHub did not confirm a comment on this item");
+  }
+  catch (e) {
+    if (e instanceof ReadOnlyError) throw e;
+    throw new MaybeSentError(`Comment failed or uncertain: ${String(e)}. Check GitHub; do not repost.`);
+  }
+  if (release) {
+    try {
+      same(await readAnswerTarget(gh, item));
+      await check?.();
+      if (close) await gh.send("PATCH", `/repos/${owner}/${repo}/issues/${n}`, { state: "closed", state_reason: "completed" });
+      await gh.send("DELETE", `/repos/${owner}/${repo}/issues/${n}/labels/needs-human`);
+    } catch (e) { throw new MaybeSentError(`Answer posted: ${posted.url}; release failed: ${String(e)}. Finish on GitHub; do not repost.`); }
+  }
+  return posted;
+}
+
+/**
  * The open asks he has answered (or commented on) and the bot hasn't acted
  * on yet, by node id. Reads comments only of open asks that have any; the reads
  * are conditional, so an unchanged issue costs nothing, and at most
@@ -408,6 +475,60 @@ export async function submitAskedReview(
 }
 
 /**
+ * Approve `pr` at `head`, the head an Inbox card read: through its review
+ * ask when one names it. Without the PR pane's prompt, an ask about
+ * another head refuses rather than approving one the bot didn't ask about.
+ * Preserve the structured outcome, including possibly sent writes.
+ */
+export async function approveAt(gh: GitHub, pr: IssueRef, head: string, ask?: { ref: IssueRef; head: string }): Promise<ApproveResult> {
+  if (ask && ask.head !== head) throw new Error(`not approving: ${refKey(ask.ref)} asks about ${ask.head.slice(0, 12)}, but the head is ${head.slice(0, 12)}; open the PR to review it`);
+  if (ask) await freshReviewAsk(gh, ask.ref, pr, ask.head);
+  const [result] = await approveSelected(gh, [{ pr, head, reason: "" }]);
+  return result!;
+}
+
+/** A member of a card's PRs, as one read of it shows it. */
+export interface MemberPr {
+  ci: CiState | "unknown";
+  ref: IssueRef;
+  url: string;
+  title: string;
+  /** open, closed or merged, and draft. */
+  state: string;
+  head: string;
+  author: string;
+  /** Why bot-pr would not promote it on a plain `/promote`; undefined when it would. */
+  problem?: string;
+}
+
+/** One PR read now, for a card's member: a single request, made when he opens it. */
+export async function readMember(gh: GitHub, ref: IssueRef): Promise<MemberPr> {
+  const pr = await gh.send<{ html_url: string; title: string; state: string; merged?: boolean; draft?: boolean; body?: string | null; user?: { login?: string } | null; head: { sha: string } }>("GET", `/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`);
+  const actual = parseIssueUrl(pr.html_url);
+  if (!actual || refKey(actual).toLowerCase() !== refKey(ref).toLowerCase()) throw new Error(`${refKey(ref)} is now ${pr.html_url}`);
+  const author = pr.user?.login ?? "ghost";
+  const problem = promoteProblem({ ref: actual, author, body: pr.body ?? "" });
+  const ci = await readHeadCi(gh, ref, pr.head.sha);
+  return { ref: actual, url: pr.html_url, title: pr.title, state: `${pr.merged ? "merged" : pr.state}${pr.draft ? " draft" : ""}`, head: pr.head.sha, author, ci, ...(problem ? { problem } : {}) };
+}
+
+/** A push after this check can only leave an approval of the old commit, never its replacement. */
+export async function promoteMember(gh: GitHub, ref: IssueRef, head: string, policy: () => void, ci: MemberPr["ci"] = "unknown"): Promise<string | undefined> {
+  return asOperator(gh, async () => {
+    const check = async () => {
+      policy();
+      const now = await readMember(gh, ref);
+      if (now.head !== head) throw new Error("This member changed: head moved. Reload, reread and confirm again.");
+      if (now.ci !== ci) throw new Error("This member changed: CI moved. Reload, reread and confirm again.");
+      if (now.state !== "open draft" || now.problem || !/^[0-9a-f]{40}$/.test(head)) throw new Error(now.problem ?? `Member is ${now.state}, not an eligible open draft`);
+      policy();
+    };
+    await check();
+    return approveHead(gh, { pr: ref, head, reason: "promote" }, check);
+  });
+}
+
+/**
  * The rerun request went out, or may have: the network failed, or GitHub
  * answered with a server error, after it was sent. Don't retry blindly.
  */
@@ -432,7 +553,7 @@ export interface RunStatus {
   problem?: string;
 }
 
-async function readRun(gh: GitHub, run: RunRef): Promise<{ raw: RawRun; jobs: RawJob[] }> {
+export async function readRun(gh: GitHub, run: RunRef): Promise<{ raw: RawRun; jobs: RawJob[] }> {
   const path = `/repos/${run.owner}/${run.repo}/actions/runs/${run.id}`;
   const raw = await gh.send<RawRun>("GET", path);
   const jobs = await gh.send<{ jobs?: RawJob[] }>("GET", `${path}/jobs?filter=latest&per_page=${PAGE_SIZE}`);
@@ -498,14 +619,7 @@ export async function rerunFailedJobs(gh: GitHub, ask: IssueRef, runUrl: string,
   const { raw, jobs } = await readRun(gh, run);
   const problem = rerunProblem(run, raw, jobs);
   if (problem) throw new Error(`not rerunning ${run.url}: ${problem}`);
-  try {
-    await gh.send("POST", `/repos/${run.owner}/${run.repo}/actions/runs/${run.id}/rerun-failed-jobs`);
-  } catch (e) {
-    // A clear refusal (4xx) means nothing happened; anything else may have.
-    if (e instanceof GitHubError && e.status < 500) throw e;
-    const why = e instanceof Error ? e.message : String(e);
-    throw new MaybeSentError(`the rerun request for ${run.url} may or may not have gone out (${why}); check the run on GitHub before trying again`);
-  }
+  await postRerun(gh, run);
   try {
     return await comment(gh, ask, formatComment(rerunComment(run)));
   } catch (e) {
@@ -540,6 +654,12 @@ export async function rerunPrRun(gh: GitHub, pr: IssueRef, runUrl: string, allow
   if (!raw.head_sha || raw.head_sha !== fresh.head?.sha) {
     throw new Error(`not rerunning ${run.url}: it ran on ${(raw.head_sha ?? "an unknown commit").slice(0, 12)}, and ${refKey(pr)} is now at ${(fresh.head?.sha ?? "?").slice(0, 12)}`);
   }
+  await postRerun(gh, run);
+  return run.url;
+}
+
+/** Ask GitHub to rerun a run's failed jobs; a clear refusal (4xx) means nothing happened, anything else may have. */
+export async function postRerun(gh: GitHub, run: RunRef): Promise<void> {
   try {
     await gh.send("POST", `/repos/${run.owner}/${run.repo}/actions/runs/${run.id}/rerun-failed-jobs`);
   } catch (e) {
@@ -547,5 +667,4 @@ export async function rerunPrRun(gh: GitHub, pr: IssueRef, runUrl: string, allow
     const why = e instanceof Error ? e.message : String(e);
     throw new MaybeSentError(`the rerun request for ${run.url} may or may not have gone out (${why}); check the run on GitHub before trying again`);
   }
-  return run.url;
 }

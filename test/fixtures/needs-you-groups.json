@@ -1,0 +1,8 @@
+{
+  "provenance": "Redacted contract-shaped replay of optional needs-you/v2 group metadata; synthetic identifiers and text, not an authorized live snapshot. Live acceptance and a real-data replay remain outstanding.",
+  "cases": [
+    { "numbers": [11, 14, 20] },
+    { "numbers": [11] },
+    { "numbers": [11, 14], "carried": true }
+  ]
+}

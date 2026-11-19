@@ -123,21 +123,10 @@ interface ProjectPriority {
   field: { id: string; options: { id: string; name: string }[] } | null;
 }
 
-interface GraphResult<T> {
-  data?: T;
-  errors?: { message?: string }[];
-}
-
-function graphData<T>(result: GraphResult<T>): T {
-  if (result.errors?.length) throw new Error(result.errors.map((error) => error.message ?? "GraphQL error").join("; "));
-  if (!result.data) throw new Error("GitHub returned no project data.");
-  return result.data;
-}
-
 /** Resolve field and option IDs by name; neither their IDs nor ordering are fixed. */
 async function setCapturePriority(gh: GitHub, itemId: string, priority: NonNullable<CaptureDraft["priority"]>): Promise<void> {
-  const result = await gh.send<GraphResult<{ organization: { projectV2: ProjectPriority | null } | null }>>("POST", "/graphql", {
-    query: `query CapturePriority($owner: String!, $number: Int!, $field: String!) {
+  const result = await gh.graphql<{ organization: { projectV2: ProjectPriority | null } | null }>(
+    `query CapturePriority($owner: String!, $number: Int!, $field: String!) {
       organization(login: $owner) {
         projectV2(number: $number) {
           id
@@ -147,9 +136,9 @@ async function setCapturePriority(gh: GitHub, itemId: string, priority: NonNulla
         }
       }
     }`,
-    variables: { owner: BOARD_OWNER, number: BOARD_NUMBER, field: FIELD.priority },
-  });
-  const project = graphData(result).organization?.projectV2;
+    { owner: BOARD_OWNER, number: BOARD_NUMBER, field: FIELD.priority },
+  );
+  const project = result.organization?.projectV2;
   const field = project?.field;
   if (!project || !field?.id || !field.options) throw new Error(`The board has no single-select field named "${FIELD.priority}".`);
   const option = field.options.find((option) => option.name === priority);
@@ -157,20 +146,20 @@ async function setCapturePriority(gh: GitHub, itemId: string, priority: NonNulla
   const itemsPath = `/orgs/${BOARD_OWNER}/projectsV2/${BOARD_NUMBER}/items`;
   const staleItems = (url: string) => new URL(url).pathname.startsWith(itemsPath);
   gh.cache.invalidate(staleItems);
-  let updated: GraphResult<{ updateProjectV2ItemFieldValue: { projectV2Item: { id: string } } | null }>;
+  let updated: { updateProjectV2ItemFieldValue: { projectV2Item: { id: string } } | null };
   try {
-    updated = await gh.send("POST", "/graphql", {
-      query: `mutation CaptureSetPriority($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+    updated = await gh.graphql(
+      `mutation CaptureSetPriority($project: ID!, $item: ID!, $field: ID!, $option: String!) {
         updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) {
           projectV2Item { id }
         }
       }`,
-      variables: { project: project.id, item: itemId, field: field.id, option: option.id },
-    });
+      { project: project.id, item: itemId, field: field.id, option: option.id },
+    );
   } finally {
     gh.cache.invalidate(staleItems);
   }
-  if (graphData(updated).updateProjectV2ItemFieldValue?.projectV2Item.id !== itemId) throw new Error("GitHub didn't confirm the item's Priority update.");
+  if (updated.updateProjectV2ItemFieldValue?.projectV2Item.id !== itemId) throw new Error("GitHub didn't confirm the item's Priority update.");
 }
 
 /**

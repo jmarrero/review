@@ -5,12 +5,12 @@
 // set the title last, who made the body's last edit, and the comment.
 //
 // It writes to the PR, so use a throwaway one, e.g. a draft PR from a
-// bot/ branch in a jmarrero-forge fork with a bot-meta section. Run it
+// bot/ branch in a cgwalters-forge fork with a bot-meta section. Run it
 // with a token of the login that should own the text (the bot's own
-// stands in for jmarrero's in tests); it only imports the app's
+// stands in for cgwalters' in tests); it only imports the app's
 // dependency-free modules, so no install is needed:
 //
-//   GH_TOKEN=... node test/e2e/make-it-mine.ts https://github.com/jmarrero-forge/REPO/pull/N "Committer Name" committer@example.com
+//   GH_TOKEN=... node test/e2e/make-it-mine.ts https://github.com/cgwalters-forge/REPO/pull/N "Committer Name" committer@example.com
 //
 // Then `bot-pr promote --dry-run URL`, with its REVIEWER set to that
 // login, should report no policy refusal.

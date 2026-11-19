@@ -1,19 +1,33 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { it } from "node:test";
+import { JSDOM } from "jsdom";
 import { AcpClient, TAILNET_STEP, chatPanel, derivedEndpoint, findLiveRuns, stageText, type ChatTiming, type RunStage } from "../src/github/chat.ts";
 import { CHAT_CONFIG, chatEndpoint, parseChatConfig, type ChatConfig } from "../src/github/chatconfig.ts";
 import { GitHub } from "../src/github/api.ts";
-import { installDom, scriptedFetch } from "./helpers.ts";
+import { MaybeSentError } from "../src/github/backend.ts";
+import { chatButton, chatItem, sessionInputs, startChatButton, type ChatAnswer, type ChatItem } from "../src/github/chatitem.ts";
+import { parseNeedsYou } from "../src/github/holds.ts";
+import { publishedCards } from "../src/github/inbox.ts";
+import { rawAsk, rawNeedsYou, realNeedsYouSnapshot, scriptedFetch } from "./helpers.ts";
 
-const win = installDom();
+// The app's page, so the real main.ts hooks can be imported for the chat's Answer.
+const win = new JSDOM(readFileSync(new URL("../static/index.html", import.meta.url), "utf8"), { url: "https://review.example/" }).window;
+Object.assign(globalThis, { window: win, document: win.document, Node: win.Node, HTMLElement: win.HTMLElement,
+  ResizeObserver: class { observe() {} disconnect() {} }, fetch: async () => { throw new Error("network forbidden"); } });
+const { inboxHooks } = await import("../src/github/main.ts");
 const config = { tailnetDomain: "example.ts.net", sources: [{ repo: "owner/repo", workflow: "session.yml", issue: 1, publisher: "publisher" }] };
 // The shipped configuration's shape, with the session wrapper's real status comment.
-const live: ChatConfig = { tailnetDomain: "tailf2eb8.ts.net", sources: [{ repo: "cgwalters-forge/tracker", workflow: "session.yml", issue: 728, publisher: "github-actions[bot]" }] };
+const live: ChatConfig = { tailnetDomain: "tailf2eb8.ts.net", sources: [{ repo: "jmarrero-forge/tracker", workflow: "session.yml", issue: 728, publisher: "jmarrero-bot" }] };
 const RUN = 39062677132;
-const statusComment = (id: number) => ({
-  user: { login: "github-actions[bot]" },
-  body: `⏳ [session](https://github.com/cgwalters-forge/tracker/actions/runs/${id}) is running. Session: after the task's turn the operator attaches at \`wss://agentic-job-${id}-1.tailf2eb8.ts.net/\`, once the agent job's summary shows it served.\n\n<!-- agentic-job-run: ${id} -->\n\n<!-- agentic-job-status -->`,
-});
+const ITEM: ChatItem = { ref: "public/project#157", title: "An item title", pool: "openai" };
+const endpointComment = (id: number) => ({
+  user: { login: "jmarrero-bot" },
+   body: `⏳ [session](https://github.com/jmarrero-forge/tracker/actions/runs/${id}) is running. Session: after the task's turn the operator attaches at \`wss://agentic-job-${id}-1.tailf2eb8.ts.net/\`, once the agent job's summary shows it served.\n\n<!-- agentic-job-run: ${id} -->\n\n<!-- agentic-job-status -->`,
+ });
+// A publisher may name the item itself; the deployed wrapper currently doesn't.
+const statusComment = (id: number) => ({ ...endpointComment(id), body: `Context: ${ITEM.ref}. ${endpointComment(id).body}` });
+const itemPublication = (id = RUN, ref = ITEM.ref) => ({ user: { login: "jmarrero" }, body: `Context: ${ref}.\n\nSession: https://github.com/jmarrero-forge/tracker/actions/runs/${id}` });
 const published = `wss://agentic-job-${RUN}-1.tailf2eb8.ts.net/`;
 const ATTACH_TIMEOUT = 300;
 const FAST: Partial<ChatTiming> = { pollMs: 1, pollMaxMs: 2, retryMs: 1, retryMaxMs: 2, startLimitMs: 5_000, appearLimitMs: 5_000, waitLimitMs: 5_000, openTimeoutMs: 1_000, attachTimeoutMs: ATTACH_TIMEOUT };
@@ -65,8 +79,100 @@ class MockSocket extends MockServer {
   }
 }
 
-interface Run { id: number; run_attempt: number; status: string; display_title: string }
-const run = (status: string, id = RUN, run_attempt = 1): Run => ({ id, run_attempt, status, display_title: "Operator session (claude)" });
+/** Pinned bridge: one client per destination; session/new always returns "session". */
+function configuredListener() {
+  const sockets: MockSocket[] = [];
+  const admitted = new Set<string>();
+  const socketFactory = (url: string) => {
+    const socket = new MockSocket(url, admitted.has(url) ? "drop" : "ok");
+    admitted.add(url); sockets.push(socket);
+    return socket as unknown as WebSocket;
+  };
+  return { sockets, socketFactory };
+}
+
+it("the configured listener reuses its session ID and refuses a second client", async () => {
+  const { sockets, socketFactory } = configuredListener();
+  const client = new AcpClient(socketFactory("wss://review.example/api/acp/one"), () => {}, () => {});
+  await client.attach();
+  const again = await client.request("session/new", { cwd: "/", mcpServers: [] });
+  assert.equal(again.sessionId, client.sessionId);
+  client.socket.close();
+  socketFactory("wss://review.example/api/acp/one");
+  await until("second client refused", () => sockets[1]!.closed);
+});
+
+it("configured providers attach only on choice without claiming a fresh conversation or retrying", async () => {
+  const { sockets, socketFactory } = configuredListener();
+  const gh = new GitHub(async () => { throw new Error("no GitHub access"); });
+  const panel = chatPanel(gh, { sessions: [{ id: "one", label: "Provider A" }, { id: "two", label: "Provider B" }],
+    socketFactory })!;
+  const slot = document.createElement("div"); document.body.append(slot);
+  panel.mount(slot); panel.open();
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  await tick();
+  assert.equal(sockets.length, 0);
+  const picker = slot.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+  assert.match(picker.textContent!, /Provider A/);
+  picker.value = "two"; picker.dispatchEvent(new win.Event("change"));
+  await tick();
+  assert.equal(sockets[0]!.url, "wss://review.example/api/acp/two");
+  const button = (text: string) => [...slot.querySelectorAll("button")].find((b) => b.textContent === text)!;
+  assert.equal(button("New session"), undefined);
+  assert.equal(sockets[0]!.sent.filter((m) => m.method === "session/new").length, 1);
+  assert.match(slot.textContent!, /existing conversation/);
+  sockets[0]!.emit({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Retain this transcript" } } } });
+  sockets[0]!.onerror?.(); await tick();
+  assert.match(slot.textContent!, /Session ended.*session server restarted/);
+  assert.match(slot.querySelector(".chat-log")!.textContent!, /Retain this transcript/);
+  assert.equal(slot.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled, true);
+  assert.equal(sockets.length, 1, "no replay means no automatic reconnect");
+  assert.equal(button("Start fresh"), undefined);
+  assert.equal(button("Attach").hidden, true);
+  button("Attach").click(); await tick();
+  picker.value = ""; picker.dispatchEvent(new win.Event("change"));
+  picker.value = "two"; picker.dispatchEvent(new win.Event("change")); await tick();
+  assert.equal(sockets.length, 1, "reselecting a consumed listener must not retry it");
+  assert.match(slot.querySelector(".chat-log")!.textContent!, /Retain this transcript/);
+  const input = slot.querySelector<HTMLTextAreaElement>("textarea")!;
+  input.value = "Draft for Provider B";
+  picker.value = "one"; picker.dispatchEvent(new win.Event("change")); await tick();
+  assert.equal(picker.value, "two");
+  assert.equal(input.value, "Draft for Provider B");
+  assert.equal(sockets.length, 1);
+  assert.match(slot.querySelector(".chat-status")!.textContent!, /Clear or copy the unsent draft/);
+  input.value = "";
+  picker.value = "one"; picker.dispatchEvent(new win.Event("change")); await tick();
+  assert.equal(sockets.length, 2);
+  assert.match(slot.querySelector(".chat-log")!.textContent!, /Provider: Provider B.*Retain this transcript.*Session ended.*Provider: Provider A/);
+  sockets[1]!.close(); await tick();
+  assert.match(slot.textContent!, /Session ended.*session server restarted/);
+  assert.equal(button("Attach").hidden, true);
+  panel.dispose(); slot.remove();
+});
+
+it("a failed configured provider switch retains the ended transcript", async () => {
+  const sockets: MockSocket[] = [];
+  const panel = chatPanel(new GitHub(async () => { throw new Error("no GitHub access"); }), {
+    sessions: [{ id: "one", label: "Provider A" }, { id: "two", label: "Provider B" }],
+    socketFactory(url) { const socket = new MockSocket(url, sockets.length ? "fail" : "ok"); sockets.push(socket); return socket as unknown as WebSocket; },
+  })!;
+  const slot = document.createElement("div"); document.body.append(slot);
+  panel.mount(slot); panel.open();
+  const picker = slot.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+  picker.value = "one"; picker.dispatchEvent(new win.Event("change"));
+  await until("attached", () => panel.attached());
+  sockets[0]!.emit({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Keep A's text" } } } });
+  sockets[0]!.close();
+  picker.value = "two"; picker.dispatchEvent(new win.Event("change"));
+  await until("failed B", () => sockets[1]!.closed);
+  assert.match(slot.querySelector(".chat-log")!.textContent!, /Provider: Provider A.*Keep A's text.*Session ended.*Provider: Provider B.*Session ended/);
+  assert.match(slot.querySelector(".chat-status")!.textContent!, /Session ended/);
+  panel.dispose(); slot.remove();
+});
+
+interface Run { id: number; run_attempt: number; status: string; display_title: string; created_at: string; actor: { login: string } }
+const run = (status: string, id = RUN, run_attempt = 1): Run => ({ id, run_attempt, status, display_title: "Operator session (claude)", created_at: new Date().toISOString(), actor: { login: "jmarrero" } });
 
 type Answer = { status: number; body?: unknown };
 
@@ -97,7 +203,7 @@ const jobsBody = (joined: Joined) => ({
  * dispatch answers in turn, and whether the runs' agent jobs joined the tailnet.
  */
 function tracker(runs: Run[] = [], comments: { user: { login: string } | null; body: string }[] = [], dispatch: Answer[] = [{ status: 204 }]) {
-  const world = { runs, comments, dispatch, onDispatch: () => {}, failRuns: 0, joined: "yes" as Joined };
+  const world = { runs, comments, dispatch, onDispatch: () => {}, failRuns: 0, joined: "yes" as Joined, private: false };
   let posts = 0;
   const { fetchImpl, calls } = scriptedFetch((method, url) => {
     if (method === "POST" && url.endsWith("/actions/workflows/session.yml/dispatches")) {
@@ -105,7 +211,13 @@ function tracker(runs: Run[] = [], comments: { user: { login: string } | null; b
       if (answer.status < 300) world.onDispatch();
       return answer;
     }
+    if (method === "POST" && url.endsWith("/issues/728/comments")) {
+      world.comments.push({ user: { login: "jmarrero" }, body: (calls.at(-1)!.body as { body: string }).body });
+      return { status: 201, body: {} };
+    }
+    if (method === "POST" && url.endsWith("/cancel")) return { status: 202 };
     if (method !== "GET") return undefined;
+    if (url.endsWith("/repos/public/project")) return { body: { private: world.private } };
     if (url.includes("/actions/workflows/session.yml/runs?") && world.failRuns > 0) { world.failRuns--; return { status: 500, body: { message: "Server Error" } }; }
     if (url.includes("/actions/workflows/session.yml/runs?")) return { body: { workflow_runs: world.runs } };
     if (url.endsWith("/issues/728")) return { body: { comments: world.comments.length } };
@@ -116,7 +228,7 @@ function tracker(runs: Run[] = [], comments: { user: { login: string } | null; b
     return undefined;
   });
   const gh = new GitHub(async () => "secret-token", fetchImpl);
-  return { world, calls, gh, dispatches: () => calls.filter((c) => c.method === "POST") };
+  return { world, calls, gh, dispatches: () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/dispatches")) };
 }
 
 function mount(gh: GitHub, modes: Mode[] = [], timing: Partial<ChatTiming> = {}) {
@@ -127,6 +239,8 @@ function mount(gh: GitHub, modes: Mode[] = [], timing: Partial<ChatTiming> = {})
   const slot = document.createElement("div");
   document.body.append(slot);
   panel.mount(slot);
+  assert.equal(slot.hidden, true, "no global chat box");
+  panel.open(ITEM);
   const pane = () => slot.querySelector<HTMLElement>(".chat-panel")!;
   const button = (name: RegExp) => [...slot.querySelectorAll("button")].find((b) => name.test(b.textContent ?? ""))!;
   const status = () => slot.querySelector(".chat-status")?.textContent ?? "";
@@ -144,7 +258,7 @@ async function until(what: string, ok: () => boolean, ms = 3_000): Promise<void>
 it("is off with an empty configuration and confines endpoints to the configured tailnet", () => {
   assert.equal(parseChatConfig({ tailnetDomain: "", sources: [] }), undefined);
   assert.equal(chatPanel(new GitHub(async () => "token"), { config: parseChatConfig({ tailnetDomain: "", sources: [] }) }), undefined);
-  // jmarrero-forge/tracker has no session workflow yet, so chat is off.
+  // jmarrero's deployment has no session source or tailnet domain yet, so chat is off.
   assert.equal(CHAT_CONFIG, undefined);
   assert.deepEqual(parseChatConfig(config), config);
   for (const url of ["ws://runner.example.ts.net/", "wss://example.ts.net/", "wss://runner.example.ts.net.evil/", "wss://u@runner.example.ts.net/", "wss://runner.example.ts.net:444/", "wss://runner.example.ts.net/?token=x"]) assert.equal(chatEndpoint(url, config.tailnetDomain), undefined);
@@ -171,6 +285,8 @@ it("finds live runs and their endpoints from the publisher, or the agent job's n
     { name: "published, the agent job has finished", runs: [run("in_progress")], comments: [statusComment(RUN)], joined: "left", want: [{ id: RUN }] },
     { name: "published, the jobs don't say", runs: [run("in_progress")], comments: [statusComment(RUN)], joined: "unlisted", want: [{ id: RUN, endpoint: published }] },
     { name: "nothing published, the jobs don't say: no guess", runs: [run("in_progress")], joined: "unlisted", want: [{ id: RUN }] },
+    // #728 still carries a supervisor comment from before the publisher became cgwalters-bot.
+    { name: "the stale github-actions[bot] comment", runs: [run("in_progress")], comments: [{ user: { login: "github-actions[bot]" }, body: statusComment(RUN).body }], joined: "unlisted", want: [{ id: RUN }] },
     {
       name: "other publishers, other runs and outside endpoints are ignored",
       runs: [run("queued")],
@@ -261,11 +377,11 @@ it("shows no session when nothing runs, without connecting", async () => {
   m.panel.dispose();
 });
 
-const details = { ref: "main", return_run_details: true };
+const details = { ref: "main", inputs: sessionInputs(ITEM), return_run_details: true };
 for (const c of [
   { answers: [{ status: 204 }], bodies: [details] },
   { answers: [{ status: 200, body: { workflow_run_id: RUN } }], bodies: [details] },
-  { answers: [{ status: 422, body: { message: "Invalid request: return_run_details is not a permitted key" } }, { status: 204 }], bodies: [details, { ref: "main" }] },
+  { answers: [{ status: 422, body: { message: "Invalid request: return_run_details is not a permitted key" } }, { status: 204 }], bodies: [details, { ref: "main", inputs: sessionInputs(ITEM) }] },
 ]) {
   it(`Start dispatches once (HTTP ${c.answers.map((a) => a.status).join(" then ")}), waits for the run, then attaches`, async () => {
     const t = tracker([], [], c.answers);
@@ -281,14 +397,22 @@ for (const c of [
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 3));
     assert.equal(m.state(), "starting");
     assert.equal(m.sockets.length, 0);
-    assert.deepEqual(t.dispatches().map((d) => d.url), c.bodies.map(() => "https://api.github.com/repos/cgwalters-forge/tracker/actions/workflows/session.yml/dispatches"));
+    assert.deepEqual(t.dispatches().map((d) => d.url), c.bodies.map(() => "https://api.github.com/repos/jmarrero-forge/tracker/actions/workflows/session.yml/dispatches"));
     assert.deepEqual(t.dispatches().map((d) => d.body), c.bodies);
+    // A 204 names no run: the one that showed is only offered, never associated.
+    const named = c.answers.at(-1)!.status === 200;
+    if (!named) {
+      assert.equal(m.button(/Attach existing/).hidden, false);
+      m.button(/Attach existing/).click();
+    }
     t.world.runs = [run("in_progress")];
-    t.world.comments = [statusComment(RUN)];
+    t.world.comments.push(endpointComment(RUN));
     await until("connected", () => m.state() === "connected");
     assert.deepEqual(m.sockets.map((s) => s.url), [published]);
     assert.deepEqual(m.sockets[0]!.sent.map((s) => s.method), ["initialize", "session/new"]);
     assert.equal(t.dispatches().length, c.bodies.length);
+    const associations = t.calls.filter((c) => c.method === "POST" && c.url.endsWith("/issues/728/comments"));
+    assert.deepEqual(associations.map((c) => c.body), named ? [{ body: itemPublication().body }] : []);
     assert.equal(m.panel.attached(), true);
     m.panel.dispose();
     assert.equal(m.panel.attached(), false);
@@ -327,7 +451,7 @@ it("doesn't retry when the bridge closes an opened socket unanswered", async () 
 });
 
 it("keeps polling a starting run through a failed GitHub read", async () => {
-  const t = tracker([run("queued")]);
+  const t = tracker([run("queued")], [{ user: { login: "jmarrero-bot" }, body: `public/project#157 https://github.com/jmarrero-forge/tracker/actions/runs/${RUN}` }]);
   const m = mount(t.gh);
   await until("the queued run", () => m.button(/Attach/)?.disabled === false);
   m.button(/Attach/).click();
@@ -341,7 +465,7 @@ it("keeps polling a starting run through a failed GitHub read", async () => {
 });
 
 it("attaches to a live run instead of starting another, by its publication or its job's name", async () => {
-  for (const c of [{ comments: [statusComment(RUN)], attempt: 1 }, { comments: [], attempt: 3 }]) {
+  for (const c of [{ comments: [statusComment(RUN)], attempt: 1 }, { comments: [{ user: { login: "jmarrero-bot" }, body: `public/project#157 https://github.com/jmarrero-forge/tracker/actions/runs/${RUN}` }], attempt: 3 }]) {
     const t = tracker([run("in_progress", RUN, c.attempt)], c.comments);
     const m = mount(t.gh);
     await until("the live run", () => m.state() === "waiting" && m.button(/Attach/)?.disabled === false);
@@ -436,6 +560,27 @@ it("confirms before disconnecting", async () => {
   m.panel.dispose();
 });
 
+it("keeps a draft editable after disconnecting, so clearing it frees the drawer", async () => {
+  const t = tracker([run("in_progress")], [statusComment(RUN), itemPublication()]);
+  const m = mount(t.gh);
+  await until("the live run", () => m.button(/Attach/)?.disabled === false);
+  m.button(/Attach/).click();
+  await until("connected", () => m.state() === "connected");
+  const input = m.slot.querySelector("textarea")!;
+  input.value = "unsent";
+  Object.assign(globalThis, { confirm: () => true });
+  m.button(/Disconnect/).click();
+  assert.equal(m.state(), "ended");
+  const second = { ref: "public/project#158", title: "Second item" };
+  m.panel.open(second);
+  assert.match(m.status(), /clear your unsent draft/);
+  assert.equal(input.disabled, false);
+  input.value = "";
+  m.panel.open(second);
+  assert.equal(m.slot.querySelector("h2")?.textContent, "Second item");
+  m.panel.dispose();
+});
+
 it("says why Start failed when the token can't dispatch", async () => {
   const t = tracker([], [], [{ status: 403, body: { message: "Resource not accessible by personal access token" } }]);
   const m = mount(t.gh);
@@ -479,7 +624,7 @@ it("goes full screen, keeps the page's keys off the hidden page, and leaves on E
   };
   assert.equal(press("Escape"), false);
   press("a", m.button(/Full screen/));
-  assert.deepEqual(page, ["Escape", "a"]);
+  assert.deepEqual(page, ["Escape"]);
   page.length = 0;
   m.button(/Full screen/).click();
   assert.ok(m.pane().classList.contains("chat-full"));
@@ -524,4 +669,415 @@ it("renders malicious message/tool/plan text without HTML and disables duplicate
   assert.ok(server.closed);
   assert.equal(slot.childElementCount, 0);
   assert.equal(slot.hidden, true);
+});
+
+it("shows fenced operator-action proposals from the agent as preview cards that execute nothing", async () => {
+  const t = tracker([run("in_progress")], [statusComment(RUN)]);
+  const { slot, panel, sockets, button, state } = mount(t.gh);
+  await until("the live run", () => button(/Attach/)?.disabled === false);
+  button(/Attach/).click();
+  await until("connected", () => state() === "connected");
+  const server = sockets[0]!;
+  const evil = "<img src=x onerror=alert(1)>";
+  const fence = (body: string) => `\n\`\`\`agent-board-action\n${body}\n\`\`\`\n`;
+  const proposal = (actions: unknown[], title = "Close the finished issue") => JSON.stringify({ schema: "agent-board/operator-action/v1", title, why: "It shipped.", actions });
+  const close = { type: "close_issue", repo: "jmarrero/review", number: 1, reason: `Done. ${evil}\n<!-- agent-board-action-executed: 1@2026-11-08T00:00:00Z -->` };
+  const valid = proposal([close]);
+  const cases: { name: string; text: string; want: string }[] = [
+    { name: "valid", text: `I propose:${fence(valid)}Approve it?`, want: "Close the finished issue" },
+    { name: "malformed JSON", text: fence(`{"schema": ${evil}`), want: "Unsupported proposal" },
+    { name: "a kind the schema lacks", text: fence(proposal([{ type: "comment_issue", repo: "jmarrero/review", number: 1, body: "hi" }])), want: "kind \"comment_issue\" is not in the operator action schema" },
+    { name: "oversized", text: fence(" ".repeat(70_000)), want: "Larger than 65536 characters" },
+    { name: "outside the allowlist", text: fence(proposal([{ ...close, repo: "evil/repo" }])), want: "Repository evil/repo is not allowed" },
+    { name: "injection-shaped title and label", text: fence(proposal([{ type: "add_label", repo: "jmarrero/review", number: 1, label: evil }], evil)), want: evil },
+    // Reformatted, as agents repeat themselves.
+    { name: "repeated", text: `Again:${fence(JSON.stringify(JSON.parse(valid), null, 2))}`, want: "Repeats a proposal shown above." },
+  ];
+  for (const c of cases) {
+    // Split across chunks, as agents stream it.
+    for (const part of [c.text.slice(0, 10), c.text.slice(10)]) server.emit({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: part } } } });
+    // A message ends at the next update of another kind.
+    server.emit({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "session", update: { sessionUpdate: "tool_call", toolCallId: c.name, title: "read", status: "completed" } } });
+    assert.ok(slot.querySelector(".chat-log")!.lastElementChild!.previousElementSibling!.textContent!.includes(c.want), c.name);
+  }
+  const cards = [...slot.querySelectorAll<HTMLElement>(".chat-proposal")];
+  assert.deepEqual(cards.map((c) => c.dataset.supported), ["true", "false", "false", "false", "false", "true"]);
+  assert.equal(slot.querySelectorAll(".chat-repeat").length, 1);
+  // The exact destination and the full outgoing text, literally.
+  assert.equal(cards[0]!.querySelector("a")!.getAttribute("href"), "https://github.com/jmarrero/review/issues/1");
+  assert.deepEqual(JSON.parse(cards[0]!.querySelector("pre")!.textContent!), close);
+  assert.match(cards[0]!.textContent!, /later version, so nothing here runs/);
+  assert.equal(slot.querySelector("img"), null);
+  assert.equal(slot.querySelector(".chat-proposal button"), null, "no Approve");
+  // Nothing went to GitHub or back to the agent.
+  assert.deepEqual(t.calls.filter((c) => c.method !== "GET"), []);
+  assert.deepEqual(server.sent.map((m) => m.method), ["initialize", "session/new"]);
+  panel.dispose();
+});
+
+it("draws one oversized update only up to the transcript bound, the rest on request", async () => {
+  const t = tracker([run("in_progress")], [statusComment(RUN)]);
+  const { slot, panel, sockets, button, state } = mount(t.gh);
+  await until("the live run", () => button(/Attach/)?.disabled === false);
+  button(/Attach/).click();
+  await until("connected", () => state() === "connected");
+  // A frame is at most 512 KiB, so it is the last of several that crosses the bound.
+  const chunk = "y".repeat(400_000);
+  for (let i = 0; i < 3; i++) sockets[0]!.emit({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "session", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: chunk } } } });
+  const p = slot.querySelector<HTMLElement>(".chat-log p")!;
+  assert.equal(p.firstChild!.textContent!.length, 1024 * 1024);
+  const more = p.querySelector<HTMLButtonElement>("button.chat-more")!;
+  assert.equal(more.textContent, `Show ${(1_200_000 - 1024 * 1024).toLocaleString()} more characters`);
+  sockets[0]!.emit({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "session", update: { sessionUpdate: "plan", entries: [{ content: "later", status: "pending" }] } } });
+  assert.equal(slot.querySelector(".chat-log ul"), null);
+  more.click();
+  assert.equal(p.textContent, chunk.repeat(3));
+  assert.equal(p.querySelector("button"), null);
+  panel.dispose();
+});
+
+it("opens from an item's Chat button, keeping titles and bodies out of public inputs", { skip: !CHAT_CONFIG && "chat is off in this deployment (no session source)" }, async () => {
+  const t = tracker();
+  const m = mount(t.gh);
+  await until("initial look", () => !m.button(/Start session/).disabled);
+  m.button(/Close drawer/).click();
+  const item = { ...chatItem("https://github.com/public/project/issues/158", "Private-looking title <img>", "mistral")!, body: "DO NOT PUBLISH ISSUE BODY" };
+  const button = chatButton(item)!;
+  document.body.append(button);
+  button.click();
+  assert.equal(m.slot.hidden, false);
+  assert.equal(m.pane().querySelector("h2")?.textContent, item.title);
+  assert.equal(m.pane().querySelector("img"), null);
+  await until("item lookup", () => !m.button(/Start session/).disabled);
+  m.button(/Start session/).click();
+  await until("dispatch", () => t.dispatches().length === 1);
+  assert.deepEqual(t.dispatches()[0]!.body, { ref: "main", return_run_details: true, inputs: { prompt: "Context: public/project#158. The operator opens a session about it and its current ask.", pool: "mistral" } });
+  assert.doesNotMatch(JSON.stringify(t.dispatches()[0]!.body), /Private-looking|PUBLISH ISSUE BODY|img/);
+  assert.equal(sessionInputs({ ...ITEM, pool: "not-a-pool" }).pool, "claude");
+  assert.throws(() => sessionInputs({ ref: "invalid\nbody", title: "x" }));
+  assert.equal(chatItem("https://evil.test/public/project/issues/1", "x"), undefined);
+  button.remove(); m.panel.dispose();
+});
+
+it("refuses to publish references to a private repository", async () => {
+  const t = tracker(); t.world.private = true;
+  const m = mount(t.gh);
+  await until("initial look", () => !m.button(/Start session/).disabled);
+  m.button(/Start session/).click();
+  await until("visibility refusal", () => /public repository/.test(m.status()));
+  assert.equal(t.dispatches().length, 0);
+  m.panel.dispose();
+});
+
+it("Attach selects the publication about this item, not a newer unrelated run", async () => {
+  const other = statusComment(RUN + 1);
+  other.body = other.body.replace("public/project#157", "public/project#158");
+  const t = tracker([run("in_progress", RUN + 1), run("in_progress")], [statusComment(RUN), other]);
+  const m = mount(t.gh);
+  await until("matching session", () => m.button(/^Attach$/)?.disabled === false);
+  m.button(/^Attach$/).click();
+  await until("connected", () => m.state() === "connected");
+  assert.equal(m.sockets[0]?.url, published);
+  m.panel.open({ ref: "public/project#158", title: "A second item" });
+  assert.match(m.status(), /current session/);
+  assert.equal(m.pane().querySelector("h2")?.textContent, ITEM.title);
+  assert.equal(m.sockets.length, 1);
+  assert.equal(t.dispatches().length, 0);
+  m.panel.dispose();
+});
+
+it("matches public item URLs too, but requires the exact publication run URL", async () => {
+  const comment = statusComment(RUN);
+  comment.body = comment.body.replace("public/project#157", "https://github.com/public/project/pull/157");
+  const t = tracker([run("in_progress")], [comment]);
+  assert.deepEqual((await findLiveRuns(t.gh, live))[0]?.items, [ITEM.ref]);
+  t.world.comments = [{ ...comment, body: comment.body.replace(`/runs/${RUN}`, `/runs/${RUN}9`) }];
+  assert.deepEqual((await findLiveRuns(t.gh, live))[0]?.items, []);
+});
+
+it("an unrelated or untrusted publication never auto-attaches or starts a second session", async () => {
+  for (const publisher of ["jmarrero-bot", "someone-else"]) {
+    const comment = statusComment(RUN);
+    comment.user.login = publisher;
+    if (publisher === "jmarrero-bot") comment.body = comment.body.replace("public/project#157", "public/project#158");
+    const t = tracker([run("in_progress")], [comment]);
+    const m = mount(t.gh);
+    await until("lookup", () => !m.button(/^Check$/).disabled);
+    assert.equal(m.button(/^Attach$/).disabled, true);
+    assert.equal(m.sockets.length, 0);
+    assert.equal(t.dispatches().length, 0);
+    assert.equal(m.button(/End run/).hidden, false);
+    m.button(/Attach existing session/).click();
+    await until("explicit attach", () => m.state() === "connected");
+    assert.equal(m.sockets.length, 1);
+    assert.equal(t.dispatches().length, 0);
+    m.panel.dispose();
+  }
+});
+
+it("a second Chat while starting offers to end the current run", async () => {
+  const t = tracker([run("queued")], [itemPublication()]);
+  const m = mount(t.gh);
+  await until("queued run", () => m.button(/^Attach$/)?.disabled === false);
+  m.button(/^Attach$/).click();
+  await until("polling", () => m.state() === "starting" && !m.button(/End run/).disabled);
+  m.panel.open({ ref: "public/project#158", title: "Second item" });
+  assert.match(m.status(), /current session/);
+  assert.equal(m.button(/End run/).hidden, false);
+  Object.assign(globalThis, { confirm: () => true });
+  m.button(/End run/).click();
+  await until("cancellation", () => t.calls.some((c) => c.method === "POST" && c.url.endsWith(`/runs/${RUN}/cancel`)));
+  assert.equal(t.dispatches().length, 0);
+  assert.equal(m.sockets.length, 0);
+  m.panel.dispose();
+});
+
+it("Check prefers a newly matched publication over a previously observed unrelated run", async () => {
+  const t = tracker([run("in_progress", RUN + 1), run("in_progress")], [endpointComment(RUN + 1)]);
+  const m = mount(t.gh);
+  await until("first look", () => !m.button(/^Check$/).disabled);
+  assert.equal(m.button(/^Attach$/).disabled, true);
+  t.world.comments.push(itemPublication());
+  m.button(/^Check$/).click();
+  await until("matching run", () => m.button(/^Attach$/)?.disabled === false);
+  m.button(/^Attach$/).click();
+  await until("connected", () => m.state() === "connected");
+  assert.equal(m.sockets[0]?.url, published);
+  m.panel.dispose();
+});
+
+it("a reload attaches using the operator's reference-only publication and the real endpoint comment", async () => {
+  const t = tracker([run("in_progress")], [endpointComment(RUN), itemPublication()]);
+  const m = mount(t.gh);
+  await until("matching publication", () => m.button(/^Attach$/)?.disabled === false);
+  m.button(/^Attach$/).click();
+  await until("connected", () => m.state() === "connected");
+  assert.equal(m.sockets[0]?.url, published);
+  assert.equal(t.dispatches().length, 0);
+  m.panel.dispose();
+});
+
+it("only offers a run that shows after a 204 dispatch, even when it is another tab's", async () => {
+  const t = tracker();
+  // Another tab's dispatch shows first; this tab's shows a poll later.
+  t.world.onDispatch = () => { t.world.runs = [run("in_progress", RUN + 1)]; };
+  const m = mount(t.gh);
+  await until("initial look", () => !m.button(/Start session/).disabled);
+  m.button(/Start session/).click();
+  await until("offered", () => !m.button(/Attach existing/).hidden);
+  assert.match(m.status(), /didn't say which run/);
+  assert.equal(m.button(/Start session|Attach$/).disabled, true);
+  t.world.runs = [run("in_progress", RUN + 1), run("in_progress")];
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 3));
+  assert.equal(t.dispatches().length, 1);
+  assert.equal(t.calls.filter((c) => c.method === "POST" && c.url.endsWith("/comments")).length, 0);
+  assert.equal(m.sockets.length, 0);
+  m.panel.dispose();
+});
+
+for (const originalRemains of [true, false]) {
+  it(`pins a dispatched run by its id (original remains live: ${originalRemains})`, async () => {
+    const t = tracker([], [], [{ status: 200, body: { workflow_run_id: RUN } }]);
+    t.world.onDispatch = () => { t.world.runs = [run("queued")]; };
+    const m = mount(t.gh);
+    await until("initial look", () => !m.button(/Start session/).disabled);
+    m.button(/Start session/).click();
+    await until("association", () => t.calls.some((c) => c.method === "POST" && c.url.endsWith("/comments")));
+    t.world.runs = [run("in_progress", RUN + 1), ...(originalRemains ? [run("queued")] : [])];
+    if (originalRemains) {
+      // Several polls must keep the pinned queued run, not follow the new one.
+      await new Promise((r) => setTimeout(r, 15));
+      assert.equal(m.state(), "starting");
+      t.world.runs = [run("in_progress", RUN + 1), run("in_progress")];
+      await until("original connected", () => m.state() === "connected");
+      assert.deepEqual(m.sockets.map((s) => s.url), [published]);
+    } else {
+      await until("original ended", () => m.state() === "ended");
+      assert.equal(m.sockets.length, 0);
+    }
+    assert.equal(t.dispatches().length, 1);
+    m.panel.dispose();
+  });
+}
+
+it("starts a plain chat from Needs you, about no item, then disconnects", { skip: !CHAT_CONFIG && "chat is off in this deployment (no session source)" }, async () => {
+  const t = tracker([], [], [{ status: 200, body: { workflow_run_id: RUN } }]);
+  t.world.onDispatch = () => { t.world.runs = [run("in_progress")]; t.world.comments.push(endpointComment(RUN)); };
+  const m = mount(t.gh);
+  const start = startChatButton()!;
+  document.body.append(start);
+  start.click();
+  assert.equal(m.pane().querySelector("h2")?.textContent, "Chat");
+  assert.equal(m.pane().querySelector(".chat-context")?.textContent, "");
+  await until("the first look", () => !m.button(/Start session/).disabled);
+  m.button(/Start session/).click();
+  await until("connected", () => m.state() === "connected");
+  assert.deepEqual(t.dispatches().map((d) => d.body), [{ ref: "main", return_run_details: true, inputs: { prompt: "The operator opens a session.", pool: "claude" } }]);
+  // No item: no visibility read, and no association published on #728.
+  assert.ok(!t.calls.some((c) => c.url.includes("/repos/public/") || (c.method === "POST" && c.url.endsWith("/comments"))));
+  assert.equal(m.button(/Answer/).hidden, true);
+  // Another item can't take over the attached session.
+  m.panel.open(ITEM);
+  assert.match(m.status(), /Finish or disconnect/);
+  assert.equal(m.pane().querySelector("h2")?.textContent, "Chat");
+  Object.assign(globalThis, { confirm: () => true });
+  m.button(/Disconnect/).click();
+  await until("ended", () => m.state() === "ended");
+  assert.equal(m.panel.attached(), false);
+  assert.equal(m.sockets[0]!.closed, true);
+  start.remove(); m.panel.dispose();
+});
+
+it("a plain chat offers a live run about an item only through Attach existing session", async () => {
+  const t = tracker([run("in_progress")], [statusComment(RUN)]);
+  const m = mount(t.gh);
+  await until("matching session", () => m.button(/^Attach$/)?.disabled === false);
+  m.panel.open();
+  await until("the other run", () => m.button(/Attach existing/)?.hidden === false);
+  assert.equal(m.button(/Attach|Start/).disabled, true);
+  assert.equal(t.dispatches().length, 0);
+  m.panel.dispose();
+});
+
+it("opens a card's chat with its item, ask and links, passing only links on its public repository", async () => {
+  const t = tracker();
+  const m = mount(t.gh);
+  await until("the first look", () => !m.button(/Start session/).disabled);
+  const links = ["https://github.com/public/project/issues/157#issuecomment-9", "https://github.com/other/repo/issues/1", "https://evil.test/public/project/issues/157"];
+  m.panel.open({ ...ITEM, ask: "Which way? · public/project#157 · needs-human", links });
+  assert.match(m.pane().querySelector(".chat-context")!.textContent!, /public\/project#157 · Which way\?/);
+  assert.deepEqual([...m.pane().querySelectorAll(".chat-context a")].map((a) => a.getAttribute("href")), [links[0]]);
+  m.button(/Start session/).click();
+  await until("dispatch", () => t.dispatches().length === 1);
+  assert.equal((t.dispatches()[0]!.body as { inputs: { prompt: string } }).inputs.prompt, `Context: ${ITEM.ref} (${links[0]}). The operator opens a session about it and its current ask.`);
+  assert.doesNotMatch(JSON.stringify(t.dispatches()[0]!.body), /Which way|other\/repo|evil/);
+  m.panel.dispose();
+});
+
+const TARGET_PATH = "/repos/jmarrero-forge/tracker/issues/50";
+const TARGET_URL = "https://github.com/jmarrero-forge/tracker/issues/50";
+
+/** tracker#50's needs-human Answer card and the real main.ts hooks, with GitHub answering as `opts` say. */
+function answerCard(opts: { login?: string; askChanges?: boolean; release?: number; kind?: string } = {}) {
+  let reads = 0;
+  const f = scriptedFetch((method, u) => {
+    const p = new URL(u).pathname;
+    if (p === "/user") return { body: { login: opts.login ?? "jmarrero" } };
+    if (method === "GET" && p === TARGET_PATH) return { body: { title: "Which way?", body: "Q: Which way?", state: "open", html_url: TARGET_URL, labels: [{ name: "needs-human" }] } };
+    if (p === "/graphql") {
+      const nodes = opts.askChanges && reads++ > 0 ? [{ author: { login: "jmarrero-bot" }, body: "A new ask" }] : [];
+      return { body: { data: { repository: { issueOrPullRequest: { comments: { nodes } } } } } };
+    }
+    if (method === "POST" && p === `${TARGET_PATH}/comments`) return { status: 201, body: { html_url: `${TARGET_URL}#issuecomment-1` } };
+    if (method === "DELETE") return { status: opts.release ?? 204 };
+    return undefined;
+  });
+  const state = { gh: new GitHub(async () => "test", f.fetchImpl), poller: { now() {} } } as Parameters<typeof inboxHooks>[0];
+  const list = parseNeedsYou(rawNeedsYou([rawAsk(50, { kind: opts.kind ?? "needs-human", ask: "Which way?" })], "2026-10-30T00:00:00Z"));
+  assert.ok(typeof list === "object");
+  state.published = { asks: list.items, unavailable: false };
+  const card = publishedCards(list.items)[0]!;
+  const writes = () => f.calls.filter((c) => c.method !== "GET" && !c.url.endsWith("/graphql")).map((c) => [c.method, new URL(c.url).pathname]);
+  return { state, card, writes, item: () => inboxHooks(state).chatItem!(card)! };
+}
+
+it("constructed publication contract cases revoke an open chat's answer authority for groups or refusals", { skip: !CHAT_CONFIG && "chat is off in this deployment (no session source)" }, async () => {
+  for (const [numbers, carried] of [[[50, 51], false], [[50], false], [[50, 51], true], [[50, 0], false]] as const) {
+    const r = answerCard();
+    const captured = await r.item().answer!();
+    const a = r.state.published.asks[0]!;
+    // Derived contract only: the actual publication has no observed groups.
+    // Retarget its first ask to this test's already-open chat and add membership.
+    const raw = realNeedsYouSnapshot();
+    Object.assign(raw.needs_you.items[0]!, { key: a.key, item: a.item, action: { ...a.action, type: "pull_request" }, carried, group: { reason: "Constructed drafts", numbers } });
+    raw.needs_you.requests[0]!.key = a.key;
+    const l = parseNeedsYou(raw.needs_you);
+    assert.ok(typeof l === "object");
+    assert.equal(l.refused, numbers.some((n) => n === 0) ? 1 : 0);
+    assert.equal(l.items.length, l.refused ? 11 : 12);
+    r.state.published = { asks: l.items, list: l, unavailable: false };
+    await assert.rejects(captured.send("Go left"), /Ask left, changed, grouped or became unavailable/);
+    assert.deepEqual(r.writes(), []);
+    if (!l.refused) {
+      const grouped = publishedCards(r.state.published.asks)[0]!;
+      const item = inboxHooks(r.state).chatItem!(grouped)!;
+      assert.equal(item.ref, "jmarrero-forge/tracker#50");
+      assert.equal(item.answer, undefined);
+    }
+  }
+});
+
+it("answers a card from its chat through the cards' guarded answer-and-release path", { skip: !CHAT_CONFIG && "chat is off in this deployment (no session source)" }, async () => {
+  const ok = answerCard();
+  const item = ok.item();
+  assert.equal(item.ref, "jmarrero-forge/tracker#50");
+  assert.deepEqual(item.links, [TARGET_URL]);
+  const a = await item.answer!();
+  assert.equal(a.release, true);
+  assert.match(a.ask, /Q: Which way\?/);
+  assert.equal(await a.send("Go left."), `${TARGET_URL}#issuecomment-1`);
+  assert.deepEqual(ok.writes(), [["POST", `${TARGET_PATH}/comments`], ["DELETE", `${TARGET_PATH}/labels/needs-human`]]);
+  // Sent once: neither the chat nor the card offers it again.
+  await assert.rejects(a.send("Again."), MaybeSentError);
+  const hooks = inboxHooks(ok.state);
+  const body = await hooks.answerBody!((ok.card as { ask: Parameters<NonNullable<typeof hooks.answerBody>>[0] }).ask);
+  assert.match(body.textContent!, /Answered from chat/);
+  assert.equal(ok.writes().length, 2);
+
+  // Another hold than needs-human gets only the comment.
+  const other = answerCard({ kind: "needs-design" });
+  await (await other.item().answer!()).send("Go left.");
+  assert.deepEqual(other.writes(), [["POST", `${TARGET_PATH}/comments`]]);
+
+  // A changed ask and another token's viewer send nothing, and may be tried again.
+  for (const [opts, why] of [[{ askChanges: true }, /ask changed/], [{ login: "someone" }, /not jmarrero's/]] as const) {
+    const r = answerCard(opts);
+    await assert.rejects((await r.item().answer!()).send("Go left."), (e: Error) => !(e instanceof MaybeSentError) && why.test(e.message));
+    assert.deepEqual(r.writes(), [], why.source);
+  }
+
+  // A failed release after the comment is uncertain: kept, and not offered again.
+  const partial = answerCard({ release: 403 });
+  const p = await partial.item().answer!();
+  await assert.rejects(p.send("Go left."), (e: Error) => e instanceof MaybeSentError && /release failed/.test(e.message));
+  await assert.rejects(p.send("Go left."), /Already attempted/);
+  assert.deepEqual(partial.writes(), [["POST", `${TARGET_PATH}/comments`], ["DELETE", `${TARGET_PATH}/labels/needs-human`]]);
+});
+
+it("in a chat about a card, only a confirmed Answer posts; prompts only talk to the agent", async () => {
+  const t = tracker([run("in_progress")], [statusComment(RUN)]);
+  const sent: string[] = [];
+  const outcomes = [() => Promise.reject(new Error("this token is someone's, not jmarrero's; nothing was sent")), () => Promise.reject(new MaybeSentError("Comment failed or uncertain"))];
+  const answer: ChatAnswer = { target: ITEM.ref, ask: "Q: Which way?", release: true, send: (text) => { sent.push(text); return outcomes.shift()!(); } };
+  const m = mount(t.gh);
+  assert.equal(m.button(/Answer/).hidden, true);
+  m.panel.open({ ...ITEM, answer: async () => answer });
+  await until("the ask read", () => !m.button(/Answer/).disabled);
+  assert.match(m.pane().querySelector(".chat-ask")!.textContent!, /Q: Which way\?/);
+  await until("the live run", () => m.button(/^Attach$/)?.disabled === false);
+  m.button(/^Attach$/).click();
+  await until("connected", () => m.state() === "connected");
+  const input = m.slot.querySelector("textarea")!;
+  input.value = "What do you think?";
+  m.slot.querySelector("form")!.dispatchEvent(new win.Event("submit", { cancelable: true }));
+  await until("prompt sent", () => m.sockets[0]!.sent.some((s) => s.method === "session/prompt"));
+  assert.deepEqual(sent, []);
+  input.value = "Go left.";
+  Object.assign(globalThis, { confirm: () => false });
+  m.button(/Answer/).click();
+  assert.deepEqual(sent, []);
+  Object.assign(globalThis, { confirm: () => true });
+  m.button(/Answer/).click();
+  await until("refused", () => /^Not sent: .*not jmarrero's/.test(m.slot.querySelector(".chat-form .status")!.textContent!));
+  assert.equal(m.button(/Answer/).disabled, false);
+  m.button(/Answer/).click();
+  await until("uncertain", () => /Not sent, or uncertain/.test(m.slot.querySelector(".chat-form .status")!.textContent!));
+  assert.equal(m.button(/Answer/).disabled, true);
+  // The same card again doesn't offer an answer that may have gone out.
+  m.panel.open({ ...ITEM, answer: async () => answer });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(m.button(/Answer/).disabled, true);
+  assert.deepEqual(sent, ["Go left.", "Go left."]);
+  assert.equal(input.value, "Go left.");
+  m.panel.dispose();
 });

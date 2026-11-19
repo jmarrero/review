@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import type { Item } from "../src/github/board.ts";
 import { ALL } from "../src/github/filter.ts";
 import { type ForgePr, VERDICT_LABEL } from "../src/github/forge.ts";
-import { type ActionVerb, age, APP_URL, entryJson, printable, queueJson, queueText, SCHEMA, suggestedAction } from "../src/github/export.ts";
+import { type ActionVerb, age, APP_URL, entryJson, printable, queueJson, queueText, SCHEMA, suggestedAction } from "../src/cli/export.ts";
 import type { Entry } from "../src/github/queue.ts";
 import { type Io, run } from "../src/cli/queue.ts";
 import { fields, rawItems, scriptedFetch } from "./helpers.ts";

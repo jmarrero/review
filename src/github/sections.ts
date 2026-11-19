@@ -4,24 +4,16 @@
 
 import { load, save } from "./store.ts";
 
-export const SECTIONS = ["needs", "agents", "changes", "priority", "usage"] as const;
+export const SECTIONS = ["needs"] as const;
 export type SectionId = (typeof SECTIONS)[number];
 
 export const SECTION_TITLE: Record<SectionId, string> = {
-  needs: "Decisions",
-  agents: "Agents",
-  changes: "Changes",
-  priority: "By priority",
-  usage: "Usage",
+  needs: "Needs you",
 };
 
 /** What a section is for, shown quietly beside its title. */
 export const SECTION_HINT: Record<SectionId, string> = {
   needs: "what waits on you, one action each",
-  agents: "who is working now",
-  changes: "what moved on the board, and what merged",
-  priority: "everything, ranked, with filters",
-  usage: "the plan's windows",
 };
 
 /** Rows a section shows before its "View all". */

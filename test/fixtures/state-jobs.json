@@ -1,4 +1,0 @@
-{
-  "total_count": 1,
-  "jobs": [ { "id": 201, "name": "agent", "status": "completed", "conclusion": "success", "labels": ["rhel10-x86_64-8c-32g"], "runner_name": "fixture-runner", "run_attempt": 2, "started_at": "2026-10-02T10:00:00Z", "completed_at": "2026-10-02T11:00:00Z" } ]
-}

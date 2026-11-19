@@ -242,6 +242,12 @@ async function readIssue(gh: GitHub, c: ReviewDraftConfig, issue: RawIssue, fres
 }
 
 /** The open draft issues, most recently updated first, each with its newest draft. */
+export async function loadDraftIssue(gh: GitHub, c: ReviewDraftConfig, number: number): Promise<DraftIssue> {
+  const issue = (await gh.get<RawIssue>(`/repos/${c.tracker}/issues/${number}`)).data;
+  if (issue.pull_request) throw new Error("A draft source must be an issue");
+  return readIssue(gh, c, issue, false);
+}
+
 export async function loadDraftIssues(gh: GitHub, c: ReviewDraftConfig): Promise<DraftIssue[]> {
   const issues = (await gh.get<RawIssue[]>(issuesPath(c, MAX_DRAFT_ISSUES))).data.filter((i) => !i.pull_request).slice(0, MAX_DRAFT_ISSUES);
   return Promise.all(issues.map((i) => readIssue(gh, c, i, false)));

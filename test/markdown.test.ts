@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createRenderer, MAX_SOURCE_CHARS } from "../src/markdown.ts";
 import { installDom } from "./helpers.ts";
+import { readFileSync } from "node:fs";
 
 const win = installDom();
 const render = createRenderer(win as unknown as Parameters<typeof createRenderer>[0]);
@@ -125,12 +126,26 @@ describe("rendering", () => {
   }
 
   it("hides HTML comments, as GitHub does, but not in code or when unclosed", () => {
-    assert.equal(html("before <!-- hidden *x* [y](https://e.example) --> after\n\n<!-- marker: abc -->"), "<p>before  after</p>\n");
+    assert.equal(html("before <!-- hidden *x* [y](https://e.example) --> after\n\n<!-- marker: abc -->"), "<p>before  after</p>\n\n");
     assert.equal(html("- a <!--\nb --> c"), "<ul>\n<li>a  c</li>\n</ul>\n");
     assert.equal(html("`<!-- shown -->`"), "<p><code>&lt;!-- shown --&gt;</code></p>\n");
     assert.equal(html("```\n<!-- shown -->\n```"), "<pre><code>&lt;!-- shown --&gt;\n</code></pre>\n");
     assert.equal(html("a <!-- open"), "<p>a &lt;!-- open</p>\n");
     assert.equal(html("a <!--> b <!---> c -->"), "<p>a  b  c --&gt;</p>\n");
+  });
+
+  it("hides a comment opening a line through its close, across blank lines", () => {
+    assert.equal(html("before\n<!-- metadata\n\n## not a heading\n\n[hidden](https://e.example)\n--> after\n\nnext"), "<p>before</p>\n\n<p>after</p>\n<p>next</p>\n");
+    assert.equal(html("> q\n> <!-- x\n>\n> y -->\n\nz"), "<blockquote>\n<p>q</p>\n\n</blockquote>\n<p>z</p>\n");
+    assert.equal(dom("- foo\n  <!-- c -->\n  bar").querySelector("li")?.textContent, "foo\nbar");
+    assert.equal(dom("- foo\n  <!-- c -->bar").querySelector("li")?.textContent, "foo\nbar");
+    // Not past its container: the text after the list item still shows.
+    assert.equal(html("- a\n  <!-- x\n\nparagraph outside\n\n-->\n\nend"), "<ul>\n<li>a\n&lt;!-- x</li>\n</ul>\n<p>paragraph outside</p>\n<p>--&gt;</p>\n<p>end</p>\n");
+  });
+
+  it("never lets a quoted comment opener in code hide the text after it", () => {
+    const source = "Write `<!--` to open.\n\nWhole paragraph here.\n\n## Heading\n\nClose with `-->` later.";
+    assert.equal(html(source), "<p>Write <code>&lt;!--</code> to open.</p>\n<p>Whole paragraph here.</p>\n<h2>Heading</h2>\n<p>Close with <code>--&gt;</code> later.</p>\n");
   });
 
   it("hides only the comments themselves after a [ that is not a link", () => {
@@ -143,12 +158,23 @@ describe("rendering", () => {
     assert.match(dom("<!--".repeat(MAX_SOURCE_CHARS / 4)).textContent ?? "", /^<!--/);
     assert.match(dom("[<!--".repeat(MAX_SOURCE_CHARS / 5)).textContent ?? "", /^\[<!--/);
     assert.equal(dom(`${"<!--".repeat(MAX_SOURCE_CHARS / 8)}-->x`).textContent?.trim(), "x");
+    assert.match(dom(`${"> <!--\n".repeat(MAX_SOURCE_CHARS / 7)}\n-->`).textContent ?? "", /-->\s*$/);
+    // The outdented `-->` continues the item's paragraph, which hides the comment inline.
+    assert.equal(dom(`- a\n${"  <!--\n".repeat(MAX_SOURCE_CHARS / 7)}-->`).textContent?.trim(), "a");
   });
 
-  it("cuts very long sources", () => {
-    const root = dom("x".repeat(MAX_SOURCE_CHARS + 10));
-    assert.match(root.textContent ?? "", /cut: too long/);
-    assert.ok((root.textContent ?? "").length < MAX_SOURCE_CHARS + 100);
+  it("does not cut long sources", () => {
+    const source = "x".repeat(MAX_SOURCE_CHARS + 10);
+    assert.equal(dom(source).textContent?.trim(), source);
+  });
+
+  it("renders the recorded status body without its metadata marker", () => {
+    const { body } = JSON.parse(readFileSync(new URL("./fixtures/project-status.json", import.meta.url), "utf8"));
+    assert.match(body, /bot-board-status-v1/);
+    const root = dom(body);
+    assert.doesNotMatch(root.textContent ?? "", /bot-board-status-v1|<!--|-->/);
+    assert.ok(root.querySelector("h2"));
+    assertSafe(root);
   });
 });
 
@@ -157,4 +183,9 @@ it("shows task list items as ☑/☐, also when the list interrupts a paragraph,
   assert.deepEqual([...root.querySelectorAll("li")].map((li) => li.textContent), ["☑ A) An org ruleset x", "☐ B) Not a [ ] box"]);
   assert.equal(root.querySelector("p:last-child")!.textContent, "[x] not in a list");
   assertSafe(root);
+});
+
+it("hides tasks inside multiline metadata", () => {
+  const root = dom("<!-- metadata\n\n- [ ] hidden\n-->\n\n- [ ] visible\n- [x] done");
+  assert.deepEqual([...root.querySelectorAll("li")].map((li) => li.textContent), ["☐ visible", "☑ done"]);
 });

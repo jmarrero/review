@@ -1,0 +1,44 @@
+{
+  "_comment": "Forgejo API answers by request path, relative to /api/v1, trimmed to the fields the service reads plus a few it ignores. Synthetic, in the documented shapes, not a live capture.",
+  "answers": {
+    "/settings/api": { "max_response_items": 50, "default_paging_num": 30, "default_git_trees_per_page": 1000, "default_max_blob_size": 10485760 },
+    "/user": { "id": 1, "login": "operator", "full_name": "" },
+    "/repos/issues/search?state=open&type=issues&owner=infra&labels=needs+operator%2Cblocked&sort=recentupdate&limit=50": [
+      {
+        "id": 501, "number": 12, "title": "Rotate the backup key", "state": "open",
+        "html_url": "https://forge.example/infra/dns/issues/12",
+        "labels": [ { "id": 7, "name": "needs operator", "color": "e11d21" } ],
+        "pull_request": null,
+        "repository": { "id": 3, "name": "dns", "owner": "infra", "full_name": "infra/dns" },
+        "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-10T09:00:00Z"
+      },
+      {
+        "id": 502, "number": 40, "title": "Upgrade blocked on storage", "state": "open",
+        "html_url": "https://forge.example/infra/cluster/issues/40",
+        "labels": [ { "id": 8, "name": "blocked", "color": "fbca04" }, { "id": 9, "name": "storage", "color": "0052cc" } ],
+        "pull_request": null,
+        "repository": { "id": 4, "name": "cluster", "owner": "infra", "full_name": "infra/cluster" },
+        "created_at": "2026-11-01T08:00:00Z", "updated_at": "2026-11-09T18:00:00Z"
+      }
+    ],
+    "/repos/issues/search?state=open&type=issues&owner=homelab&labels=needs+operator%2Cblocked&sort=recentupdate&limit=50": [],
+    "/repos/issues/search?state=open&type=pulls&review_requested=true&sort=recentupdate&limit=50": [
+      {
+        "id": 503, "number": 41, "title": "Bump the ingress controller", "state": "open",
+        "html_url": "https://forge.example/infra/cluster/pulls/41",
+        "labels": [],
+        "pull_request": { "draft": false, "merged": false, "html_url": "https://forge.example/infra/cluster/pulls/41" },
+        "repository": { "id": 4, "name": "cluster", "owner": "infra", "full_name": "infra/cluster" },
+        "created_at": "2026-11-10T07:00:00Z", "updated_at": "2026-11-10T10:00:00Z"
+      },
+      {
+        "id": 504, "number": 5, "title": "WIP: Add a media server", "state": "open",
+        "html_url": "https://forge.example/homelab/media/pulls/5",
+        "labels": [],
+        "pull_request": { "draft": true, "merged": false, "html_url": "https://forge.example/homelab/media/pulls/5" },
+        "repository": { "id": 6, "name": "media", "owner": "homelab", "full_name": "homelab/media" },
+        "created_at": "2026-11-05T07:00:00Z", "updated_at": "2026-11-06T10:00:00Z"
+      }
+    ]
+  }
+}

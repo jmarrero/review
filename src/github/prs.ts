@@ -23,6 +23,9 @@ import {
 import {
   type CiCheck,
   ciChecks,
+  ciSummary,
+  type CiState,
+  type RawCheckRun,
   type ForgePr,
   isForgeDraft,
   parseSearchPr,
@@ -95,17 +98,19 @@ async function searchPrs(gh: GitHub, query: string): Promise<ForgePr[]> {
   const out: ForgePr[] = [];
   const q = encodeURIComponent(query);
   for (let page = 1; page <= MAX_SEARCH_PAGES; page++) {
-    const r = await gh.get<{ items?: RawSearchIssue[]; total_count?: number }>(
+    const r = await gh.get<{ items?: RawSearchIssue[]; total_count?: number; incomplete_results?: boolean }>(
       `/search/issues?q=${q}&sort=created&order=asc&per_page=${PAGE_SIZE}&page=${page}`,
     );
-    const items = r.data.items ?? [];
+    const items = r.data?.items;
+    if (!Array.isArray(items)) throw new Error("GitHub's PR search response has no valid items array");
+    if (r.data.incomplete_results) throw new Error("GitHub's PR search returned incomplete results");
     for (const raw of items) {
       const pr = parseSearchPr(raw);
       if (pr) out.push(pr);
     }
-    if (items.length < PAGE_SIZE || out.length >= (r.data.total_count ?? 0)) break;
+    if (items.length < PAGE_SIZE || page * PAGE_SIZE >= (r.data.total_count ?? Infinity)) return out;
   }
-  return out;
+  throw new Error(`GitHub's PR search exceeds the ${MAX_SEARCH_PAGES * PAGE_SIZE}-result read limit`);
 }
 
 /** Run `fn` over `items`, at most `limit` at a time. */
@@ -223,6 +228,19 @@ async function requiredChecks(gh: GitHub, repo: string, branch: string): Promise
 
 /** Pages of a head's check runs to read at most (a big CI matrix runs past one). */
 const MAX_CHECK_PAGES = 3;
+
+/** Uncached, bounded CI for an explicitly inspected head; incomplete is unknown. */
+export async function readHeadCi(gh: GitHub, ref: IssueRef, sha: string): Promise<CiState | "unknown"> {
+  try {
+    const path = `/repos/${ref.owner}/${ref.repo}/commits/${sha}`;
+    const [runs, statuses] = await Promise.all([
+      gh.send<{ check_runs: RawCheckRun[]; total_count: number }>("GET", `${path}/check-runs?per_page=100`),
+      gh.send<{ statuses: RawStatus[]; total_count: number }>("GET", `${path}/status?per_page=100`),
+    ]);
+    if (!Array.isArray(runs.check_runs) || !Array.isArray(statuses.statuses) || runs.total_count !== runs.check_runs.length || statuses.total_count !== statuses.statuses.length || runs.total_count >= 100 || statuses.total_count >= 100) return "unknown";
+    return ciSummary(ciChecks(runs.check_runs, statuses.statuses));
+  } catch { return "unknown"; }
+}
 
 /** The latest check runs on a commit, every page up to MAX_CHECK_PAGES. */
 async function headCheckRuns(gh: GitHub, repo: string, sha: string): Promise<RawAppCheckRun[]> {
@@ -597,7 +615,10 @@ export async function submitReview(
     try {
       url = (await gh.send<{ html_url?: string }>("POST", `${pullPath(ref)}/reviews`, r)).html_url ?? url;
     } catch (e) {
-      const sent = i === 0 ? "nothing was sent" : `the comments on ${i} earlier commit${i > 1 ? "s" : ""} went out, the rest didn't`;
+      const prior = i ? `the comments on ${i} earlier commit${i > 1 ? "s" : ""} went out; ` : "";
+      const sent = e instanceof GitHubError && e.status >= 400 && e.status < 500
+        ? (i ? `${prior}the rest didn't` : "nothing was sent")
+        : `${prior}this review may have been sent; check GitHub before trying again`;
       throw new Error(`${e instanceof Error ? e.message : String(e)} (${sent})`);
     }
     onSent(i);

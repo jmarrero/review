@@ -1,8 +1,8 @@
 {
   "repository": "cgwalters-forge/agent-board",
-  "commit": "7311f92ef069adf38b0727e9b3fa59047b89b351",
+  "commit": "84875a50e0549d585a028218791eeb4162c51b80",
   "files": [
-    { "path": "docs/operator-actions.schema.json", "source": "docs/operator-actions.schema.json", "blob": "de45bb24740d6028c4d2642778953a8c55212f03" },
-    { "path": "test/fixtures/operator-actions.json", "source": "fixtures/operator-actions.json", "blob": "47d69d066caaadddf5abe8455187543cdbd9ce44" }
+    { "path": "docs/operator-actions.schema.json", "source": "docs/operator-actions.schema.json", "blob": "6a3d009759fead7749f6ab85180c481c5d0bfa33" },
+    { "path": "test/fixtures/operator-actions.json", "source": "fixtures/operator-actions.json", "blob": "6feecc9d813fd8412b110e8dacf3b1dcde47198d" }
   ]
 }

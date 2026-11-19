@@ -1,13 +1,14 @@
 import config from "./decisions-config.json" with { type: "json" };
-import { h } from "../dom.ts";
-import { GitHub, GitHubError } from "./api.ts";
-import { taskItemLines, type Renderer } from "../markdown.ts";
+import { GitHub } from "./api.ts";
 
-// `checkboxes: true` makes an open entry's task-list items tappable; off
-// unless set, so a document not written for one-tap edits stays read-only.
 // `resolve: true` reads the live state of each open entry's About item (see
 // readMarks); off unless set, so the document costs one read per refresh.
-export const DECISIONS_CONFIG = config as { document: { repo: string; number: number; checkboxes?: boolean; resolve?: boolean } | null; legacyQuestions: boolean };
+// `inbox: true` shows the Inbox view as one card per thing to do (inbox.ts)
+// instead of the Decisions rows and the opt-in panels; the document's
+// entries show only as its cards.
+export const DECISIONS_CONFIG = config as { document: DocumentTarget | null; legacyQuestions: boolean; inbox?: boolean };
+
+export interface DocumentTarget { repo: string; number: number; resolve?: boolean }
 
 function proseLines(text: string): { text: string; start: number }[] {
   const lines: { text: string; start: number }[] = [];
@@ -48,7 +49,12 @@ export interface About {
 // point that read elsewhere on the API.
 const ABOUT_LINE = /^About: ((?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+#)[A-Za-z0-9_.-]+)#([1-9]\d{0,8})(?:,? asked (\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?Z)?))?\s*$/;
 
-function parseAbout(text: string): About | undefined {
+// agent-board writes what an entry blocks at the end of its heading,
+// `### D12 Enable scheduler? (P0, blocks owner/repo#7)`; with no About line,
+// that item is the one the entry is about. Same name rules as ABOUT_LINE.
+const HEADING_ABOUT = /\((?:[^()]*, )?blocks ((?!\.+\/)[A-Za-z0-9_.-]+\/(?!\.+#)[A-Za-z0-9_.-]+)#([1-9]\d{0,8})\)\s*$/;
+
+function parseAbout(text: string, title: string): About | undefined {
   for (const line of proseLines(text)) {
     if (!/^About:/.test(line.text)) continue;
     const m = ABOUT_LINE.exec(line.text);
@@ -56,7 +62,8 @@ function parseAbout(text: string): About | undefined {
     const asked = m[3] && !Number.isNaN(Date.parse(m[3])) ? new Date(m[3]).toISOString() : undefined;
     return { repo: m[1]!, number: Number(m[2]), ...(asked ? { asked } : {}) };
   }
-  return undefined;
+  const m = HEADING_ABOUT.exec(title);
+  return m ? { repo: m[1]!, number: Number(m[2]) } : undefined;
 }
 
 export function parseDocument(body: string): DocumentEntry[] {
@@ -88,7 +95,7 @@ export function parseDocument(body: string): DocumentEntry[] {
       return m ? [{ letter: m[2]!, text: m[3]!, checked: m[1] !== " " }] : [];
     });
     if (new Set(options.map((o) => o.letter)).size !== options.length) throw new Error("Duplicate option letters");
-    const about = parseAbout(text);
+    const about = parseAbout(text, heading.title);
     return [{ ...heading, id: heading.id, end, text, options, ...(about ? { about } : {}) }];
   });
   if (new Set(entries.map((e) => e.id)).size !== entries.length) throw new Error("Duplicate decision ids");
@@ -112,35 +119,15 @@ export function answerDocument(body: string, id: string, letter: string, reply: 
   return body.slice(0, entry.start) + replacement + body.slice(entry.end);
 }
 
-// The start of a line markdown-it reads as a task list item: optional
-// blockquote markers, a bullet or ordered marker, then "[ ]" or "[x]". The
-// line comes from markdown-it's map (taskItemLines); this only finds the box
-// on it, and refuses a line it does not recognise rather than guess.
-const TASK_LINE = /^((?:[ \t]*>)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[)([ xX])(?=\][ \t])/;
-// Lettered options are answered through the form, with its Reply line.
-const OPTION_LINE = /^- \[[ xX]\] [A-Z]\) /;
-
-/** Line `line` (0-based) of `text`, without its line ending, and where it starts. */
-function lineAt(text: string, line: number): { text: string; start: number } | undefined {
-  let start = 0;
-  // Line breaks as markdown-it counts them, a lone \r included, so its line
-  // numbers name the same lines here.
-  const lines = text.split(/(?<=\r\n|\r(?!\n)|\n)/);
-  for (const before of lines.slice(0, line)) start += before.length;
-  const found = lines[line];
-  return found === undefined ? undefined : { text: found.replace(/\r?\n$|\r$/, ""), start };
-}
-
-/** Tick or untick the task-list item on line `line` of open entry `id`'s text, changing only that line's box. */
-export function toggleDocument(body: string, id: string, line: number, checked: boolean): string {
-  const entry = parseDocument(body).find((e) => e.id === id && !e.done);
-  const found = entry && lineAt(entry.text, line);
-  const box = found && !OPTION_LINE.test(found.text) ? TASK_LINE.exec(found.text) : null;
-  // The box must still be in the state the checkbox was showing.
-  if (!entry || !found || !box || (box[2] !== " ") === checked) throw new Error("Item is no longer there to toggle");
-  // entry.text is the body up to entry.end, from just after its heading.
-  const at = entry.end - entry.text.length + found.start + box[1]!.length;
-  return body.slice(0, at) + (checked ? "x" : " ") + body.slice(at + 1);
+/**
+ * answerDocument, only while entry `shown.id` still reads as `shown`: a
+ * form kept on the page since then would otherwise tick whatever its
+ * letter says now, not the option he picked.
+ */
+export function answerShownEntry(body: string, shown: DocumentEntry, letter: string, reply: string): string {
+  const now = parseDocument(body).find((e) => e.id === shown.id);
+  if (!now || now.title !== shown.title || now.text !== shown.text) throw new Error(`${shown.id} changed since it was shown; press r to reload it`);
+  return answerDocument(body, shown.id, letter, reply);
 }
 
 /** A write refused because the document is no longer `shown`; `body` is what it is now. */
@@ -161,10 +148,6 @@ export async function sendDocumentEdit(gh: GitHub, path: string, shown: string, 
   if (fresh.body !== shown) throw new DocumentChanged(fresh.body);
   await gh.send("PATCH", path, { body });
   return body;
-}
-
-export function sendDocumentAnswer(gh: GitHub, path: string, shown: string, id: string, letter: string, reply: string): Promise<string> {
-  return sendDocumentEdit(gh, path, shown, (body) => answerDocument(body, id, letter, reply));
 }
 
 /** What an entry's About item says now: closed or merged resolves the entry; comments since the ask only mark it. */
@@ -210,214 +193,18 @@ export async function readMarks(gh: GitHub, entries: DocumentEntry[]): Promise<M
   return marks;
 }
 
-function markNote(mark: Mark): HTMLElement {
-  const link = h("a", { href: /^https:\/\//.test(mark.url) ? mark.url : undefined }, mark.item);
-  if (mark.state !== "answered") return h("p", { class: "decision-mark" }, link, ` is ${mark.state}.`);
-  return h("p", { class: "decision-mark" }, link, ` has ${mark.comments === 1 ? "a comment" : `${mark.comments} comments`} since the ask: check it before answering.`);
-}
-
-/**
- * Swap the ☐/☑ glyphs `render` put on an open entry's task items for
- * checkboxes calling `toggle` with each item's source line. Glyphs pair with
- * markdown-it's task items in document order; if any list item's text
- * merely starts with a glyph, the counts differ and all stay glyphs, since
- * a tap could then tick a different line than the one shown.
- */
-function tappableTasks(md: HTMLElement, entry: DocumentEntry, toggle: (id: string, line: number, checked: boolean) => Promise<void>, status: HTMLElement): boolean {
-  const glyphs = [...md.querySelectorAll("li")].flatMap((li) => {
-    // 4 is NodeFilter.SHOW_TEXT, which jsdom's window has but node's global
-    // does not. A loose list item's first text is the newline before its <p>.
-    const walker = document.createTreeWalker(li, 4);
-    let node = walker.nextNode() as Text | null;
-    while (node && !node.data.trim()) node = walker.nextNode() as Text | null;
-    return node && /^[☐☑] /.test(node.data) ? [node] : [];
-  });
-  const lines = taskItemLines(entry.text);
-  if (glyphs.length !== lines.length) return false;
-  let any = false;
-  glyphs.forEach((node, i) => {
-    const line = lines[i]!;
-    const source = lineAt(entry.text, line);
-    const box = source && !OPTION_LINE.test(source.text) ? TASK_LINE.exec(source.text) : null;
-    const checked = node.data[0] === "☑";
-    if (!box || (box[2] !== " ") !== checked) return;
-    any = true;
-    const input = h("input", { type: "checkbox", "aria-label": `${entry.id}: ${node.data.slice(2, 82)}` });
-    input.checked = checked;
-    input.addEventListener("change", async () => {
-      input.disabled = true;
-      try {
-        await toggle(entry.id, line, input.checked);
-        status.textContent = "";
-      } catch (e) {
-        input.checked = !input.checked;
-        status.textContent = e instanceof Error ? e.message : String(e);
-      } finally {
-        input.disabled = false;
-      }
-    });
-    node.data = node.data.slice(1);
-    node.before(input);
-  });
-  return any;
-}
-
-/**
- * The document, with each entry's text as GitHub-flavored markdown (sanitized by `render`), and a form for each one still open.
- * With `toggle`, an open entry's task-list items are checkboxes; done entries stay read-only.
- * An entry `marks` says is closed or merged is resolved: it goes, read-only, under a
- * folded "Resolved", whatever the document still says; one answered since the ask is only marked.
- */
-export function documentView(body: string, send: (id: string, letter: string, reply: string) => Promise<void>, render: Renderer, repository?: string, toggle?: (id: string, line: number, checked: boolean) => Promise<void>, marks = new Map<string, Mark>()): HTMLElement {
-  const root = h("div", { class: "decision-document" });
-  const resolved = h("details", { class: "decision-resolved" }, h("summary", {}, "Resolved"));
-  const done = h("details", {}, h("summary", {}, "Done"));
-  for (const parsed of parseDocument(body)) {
-    const found = parsed.done || !parsed.about ? undefined : marks.get(parsed.id);
-    const mark = found && found.item === aboutName(parsed.about!) ? found : undefined;
-    const closed = mark !== undefined && mark.state !== "answered";
-    // Read-only like a done entry: no form or checkbox to act on a settled ask.
-    const entry = closed ? { ...parsed, done: true } : parsed;
-    const md = h("div", { class: "md" }, render(entry.text, repository));
-    const row = h("section", {}, h("h3", {}, `${entry.id} ${entry.title}`), mark && markNote(mark), md);
-    if (toggle && !entry.done) {
-      const status = h("p", { role: "status" });
-      if (tappableTasks(md, entry, toggle, status)) row.append(status);
-    }
-    if (!entry.done && !entry.options.some((o) => o.checked)) {
-      const form = h("form", { "data-id": entry.id });
-      for (const option of entry.options) {
-        form.append(h("label", {}, h("input", { type: "radio", name: entry.id, value: option.letter, required: "" }), `${option.letter}) ${option.text}`));
-      }
-      const reply = h("input", { type: "text", "aria-label": `Reply for ${entry.id}`, maxlength: "4096" });
-      const button = h("button", { type: "submit" }, "Send");
-      const status = h("p", { role: "status" });
-      form.append(reply, button, status);
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const picked = form.querySelector<HTMLInputElement>("input:checked")?.value;
-        if (!picked || button.disabled) return;
-        button.disabled = true;
-        try {
-          await send(entry.id, picked, reply.value);
-          status.textContent = "Answered";
-          form.dataset.sent = "true";
-          for (const input of form.querySelectorAll("input")) input.disabled = true;
-        } catch (e) {
-          status.textContent = e instanceof Error ? e.message : String(e);
-          button.disabled = false;
-        }
-      });
-      row.append(form);
-    }
-    (closed ? resolved : entry.done ? done : root).append(row);
-  }
-  if (resolved.querySelector("section")) root.append(resolved);
-  root.append(done);
-  return root;
-}
-
-export const DOCUMENT_CHANGED_NOTE = "The decisions document changed; press r to reload it (unsent answers are kept).";
 export const DOCUMENT_KEPT = "The document changed; your answer is kept, check it and send again";
 
-/** The unsent forms' picks (by their label, "B) Wait") and replies, by entry id. */
-function drafts(slot: HTMLElement): Map<string, { pick: string | undefined; reply: string }> {
-  const found = new Map<string, { pick: string | undefined; reply: string }>();
-  for (const form of slot.querySelectorAll<HTMLFormElement>("form[data-id]:not([data-sent])")) {
-    const pick = form.querySelector<HTMLInputElement>('input[type="radio"]:checked')?.parentElement?.textContent ?? undefined;
-    const reply = form.querySelector<HTMLInputElement>('input[type="text"]')?.value ?? "";
-    if (pick || reply) found.set(form.dataset.id!, { pick, reply });
-  }
-  return found;
-}
-
-function slotNote(slot: HTMLElement, text: string): void {
-  slot.querySelector(":scope > p[role=status]")?.remove();
-  slot.prepend(h("p", { role: "status" }, text));
-}
-
-// `body` is the one shown, `written` the last this view itself wrote;
-// `marks` (and `markKey`, their serialization) are what it was shown with.
-const readers = new WeakMap<HTMLElement, { running: boolean; body?: string; written?: string; marks?: Map<string, Mark>; markKey?: string }>();
-
-export async function refreshDocument(gh: GitHub, slot: HTMLElement, render: Renderer, target = DECISIONS_CONFIG.document, force = false): Promise<void> {
-  if (!target) return;
-  const checkboxes = target.checkboxes === true;
+/** The document's API path, refusing a configuration that would name another one. */
+export function documentPath(target: DocumentTarget): string {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(target.repo) || !Number.isSafeInteger(target.number) || target.number < 1) throw new Error("Invalid decisions configuration");
-  const state = readers.get(slot) ?? { running: false };
-  readers.set(slot, state);
-  if (state.running) return;
-  state.running = true;
-  const path = `/repos/${target.repo}/issues/${target.number}`;
-  // Show `body`, carrying each unsent pick and reply over to the same entry's
-  // new form, so neither a reload nor a refused send loses what was typed. An
-  // entry answered or moved to Done meanwhile has no form, and its draft goes.
-  const mount = (body: string, marks = state.marks) => {
-    const kept = drafts(slot);
-    let baseline = body;
-    // Every form patches the same body: run each read/compare/PATCH after the
-    // previous one settles so a second answer builds on the first instead of
-    // overwriting it with the same stale baseline.
-    let queue = Promise.resolve();
-    const write = (edit: (body: string) => string) => {
-      const run = queue.then(async () => {
-        baseline = await sendDocumentEdit(gh, path, baseline, edit);
-        // Our own write is not a change for the poll to report.
-        if (slot.contains(view)) state.written = baseline;
-      });
-      queue = run.catch(() => {});
-      return run;
-    };
-    const answer = async (id: string, letter: string, reply: string) => {
-      try {
-        await write((body) => answerDocument(body, id, letter, reply));
-      } catch (e) {
-        // Refused as stale: show the document as it is now, with this answer
-        // still filled in, rather than leave a form every retry refuses. Not
-        // while a tap is writing (redrawing would hide its outcome) or once
-        // this view is gone (a newer one is already showing).
-        if (!(e instanceof DocumentChanged) || !slot.contains(view) || slot.querySelector('.md input[type="checkbox"]:disabled')) throw e;
-        mount(e.body);
-        state.body = e.body;
-        const status = slot.querySelector<HTMLFormElement>(`form[data-id="${id}"]`)?.querySelector("p[role=status]");
-        if (status) status.textContent = DOCUMENT_KEPT;
-        else slotNote(slot, `The document changed; ${id} is no longer open to answer.`);
-        throw e;
-      }
-    };
-    const view = documentView(body, answer, render, target.repo, checkboxes ? (id, index, checked) => write((body) => toggleDocument(body, id, index, checked)) : undefined, marks);
-    for (const [id, draft] of kept) {
-      const form = view.querySelector<HTMLFormElement>(`form[data-id="${id}"]`);
-      if (!form) continue;
-      // A pick whose option was reworded or relettered is dropped, not moved
-      // onto whatever that letter says now; the reply is kept either way.
-      for (const radio of form.querySelectorAll<HTMLInputElement>('input[type="radio"]')) radio.checked = radio.parentElement?.textContent === draft.pick;
-      form.querySelector<HTMLInputElement>('input[type="text"]')!.value = draft.reply;
-    }
-    slot.replaceChildren(view);
-  };
-  try {
-    const { data } = await gh.get<{ body: string }>(path);
-    // An item can close with the document untouched, so its state is read
-    // on every refresh, not only when the body changed.
-    const marks = target.resolve === true ? await readMarks(gh, parseDocument(data.body)) : new Map<string, Mark>();
-    const markKey = JSON.stringify([...marks]);
-    slot.querySelector(":scope > p[role=status]")?.remove();
-    if (!force && state.body === data.body && state.markKey === markKey) return;
-    // Redrawing under a half-written answer would move it as it is typed:
-    // say the document changed, and leave the reload to r.
-    if (!force && drafts(slot).size) return data.body === state.written && state.markKey === markKey ? undefined : slotNote(slot, DOCUMENT_CHANGED_NOTE);
-    // A tap still writing: re-rendering now would show a body without it.
-    // A forced reload goes ahead; the re-read before each write then refuses
-    // the next tap with "changed, reload" rather than undo this one.
-    if (!force && slot.querySelector('.md input[type="checkbox"]:disabled')) return;
-    mount(data.body, marks);
-    state.body = data.body;
-    state.marks = marks;
-    state.markKey = markKey;
-  } catch (e) {
-    slotNote(slot, e instanceof GitHubError && e.status === 404 ? "Cannot read the decisions issue: it may be private and this viewer's token has no access, or the issue does not exist." : String(e));
-  } finally {
-    state.running = false;
-  }
+  return `/repos/${target.repo}/issues/${target.number}`;
+}
+
+/** The document as it is now, and with `resolve`, the marks of its open entries' items. */
+export async function readDocument(gh: GitHub, target: DocumentTarget): Promise<{ body: string; marks: Map<string, Mark> }> {
+  const { data: { body } } = await gh.get<{ body: string }>(documentPath(target));
+  // An item can close with the document untouched, so its state is read
+  // on every refresh, not only when the body changed.
+  return { body, marks: target.resolve === true ? await readMarks(gh, parseDocument(body)) : new Map<string, Mark>() };
 }

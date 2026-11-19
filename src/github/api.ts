@@ -24,6 +24,14 @@ export class GitHubError extends Error {
   }
 }
 
+/** A local refusal, not an attempted request or a missing GitHub permission. */
+export class ReadOnlyError extends GitHubError {
+  override name = "ReadOnlyError";
+  constructor() {
+    super(403, "Read-only session: enable writes in the More menu, then confirm the action again. Nothing was sent.");
+  }
+}
+
 /** GitHub refused a request for a rate limit, or one was still in force: nothing is sent before `retryAt`. */
 export class RateLimited extends GitHubError {
   override name = "RateLimited";
@@ -87,6 +95,12 @@ export class CacheMiss extends Error {
   override name = "CacheMiss";
 }
 
+interface Page {
+  entry: CachedResponse;
+  changed: boolean;
+  headers?: Headers;
+}
+
 export interface Fetched<T> {
   data: T;
   /** False when the server answered 304 and the cached data was reused. */
@@ -139,6 +153,8 @@ export class GitHub {
   readonly cache: ResponseCache;
   /** Called on any 401: the token was revoked or expired. */
   onUnauthorized: (() => void) | undefined;
+  /** Browser sessions start read-only; CLI callers retain their existing policy. */
+  readOnly = false;
   /** Answer GETs from the cache only, never the network (see cacheOnly). */
   #cacheOnly = false;
   #oldest: number | undefined;
@@ -152,6 +168,8 @@ export class GitHub {
   readonly #pending = new Set<{ sent: number; abort: AbortController }>();
   readonly #slots = new Slots(GITHUB_CONCURRENCY);
   readonly #searchSlot = new Slots(1);
+  /** The GETs being answered, by URL, and the cache generation each was sent in. */
+  readonly #inFlight = new Map<string, { generation: number; page: Promise<Page> }>();
   #blockedUntil = 0;
 
   constructor(token: TokenGetter, fetchImpl: Fetch = (i, init) => fetch(i, init), cache: ResponseCache = new ResponseCache()) {
@@ -211,6 +229,8 @@ export class GitHub {
    */
   abandonGets(before: number): void {
     for (const p of this.#pending) if (p.sent < before) p.abort.abort();
+    // A GET from now on sends afresh rather than join one being abandoned.
+    this.#inFlight.clear();
   }
 
   /** Until when (epoch ms) GitHub said to send nothing; 0 or past when nothing is held back. */
@@ -285,15 +305,32 @@ export class GitHub {
     return res;
   }
 
-  /** GET one page, conditionally if we have it cached with a validator. */
-  async #getPage(url: string): Promise<{ entry: CachedResponse; changed: boolean }> {
-    const cached = await this.cache.get(url);
+  /**
+   * GET one page, conditionally if we have it cached with a validator.
+   * Loaders that read the same URL at once (the board's fields, a
+   * heartbeat issue's comments) share one request, unless a write since
+   * it went out may have changed the answer.
+   */
+  async #getPage(url: string): Promise<Page> {
     if (this.#cacheOnly) {
+      const cached = await this.cache.get(url);
       if (!cached) throw new CacheMiss(`not cached: GET ${url}`);
       this.#oldest = Math.min(this.#oldest ?? cached.fetchedAt, cached.fetchedAt);
       if (this.#ageParent) this.#ageParent.#oldest = Math.min(this.#ageParent.#oldest ?? cached.fetchedAt, cached.fetchedAt);
       return { entry: cached, changed: true };
     }
+    const generation = this.cache.generation;
+    const shared = this.#inFlight.get(url);
+    if (shared?.generation === generation) return shared.page;
+    const page: Promise<Page> = this.#fetchPage(url).finally(() => {
+      if (this.#inFlight.get(url)?.page === page) this.#inFlight.delete(url);
+    });
+    this.#inFlight.set(url, { generation, page });
+    return page;
+  }
+
+  async #fetchPage(url: string): Promise<Page> {
+    const cached = await this.cache.get(url);
     const validators: Record<string, string> = {};
     if (cached?.etag) validators["If-None-Match"] = cached.etag;
     else if (cached?.lastModified) validators["If-Modified-Since"] = cached.lastModified;
@@ -301,7 +338,7 @@ export class GitHub {
     const res = await this.#send("GET", url, validators);
     if (res.status === 304 && cached) {
       this.cache.refreshed(url);
-      return { entry: cached, changed: false };
+      return { entry: cached, changed: false, headers: res.headers };
     }
     if (!res.ok) throw new GitHubError(res.status, await errorMessage(res, `GET ${url}`));
     const text = await res.text();
@@ -313,12 +350,13 @@ export class GitHub {
     if (lastModified) entry.lastModified = lastModified;
     if (next) entry.next = next;
     this.cache.put(url, entry, text.length, generation);
-    return { entry, changed: true };
+    return { entry, changed: true, headers: res.headers };
   }
 
-  /** GET a JSON resource, conditionally. */
-  async get<T>(path: string): Promise<Fetched<T>> {
-    const { entry, changed } = await this.#getPage(this.#url(path));
+  /** GET a JSON resource, conditionally; observe network headers even on a 304. */
+  async get<T>(path: string, onHeaders?: (headers: Headers) => void): Promise<Fetched<T>> {
+    const { entry, changed, headers } = await this.#getPage(this.#url(path));
+    if (headers) onHeaders?.(headers);
     return { data: entry.data as T, changed };
   }
 
@@ -361,20 +399,37 @@ export class GitHub {
    * or fills the cache, so a GET here is always the server's current
    * answer: guards before a write (the approve's head check) use it. A
    * successful write drops the cached responses it may have changed.
+   * `expectedStatus` requires an endpoint's completion acknowledgment, not just any 2xx.
    */
-  async send<T>(method: string, path: string, body?: unknown): Promise<T> {
+  async send<T>(method: string, path: string, body?: unknown, expectedStatus?: number): Promise<T> {
     if (this.#cacheOnly) throw new Error(`cache-only client: not sending ${method} ${path}`);
     const url = this.#url(path);
+    // A GraphQL query is a read: invalidating would also stop GETs sharing a request.
+    const query = url === `${API_ROOT}/graphql` ? (body as { query?: unknown } | undefined)?.query : undefined;
+    const read = method === "GET" || (method === "POST" && typeof query === "string" && /^\s*query\b/.test(query) && !/\bmutation\b/.test(query));
+    // A pasted token may already have write scopes. Refuse before invalidating
+    // cache or sending anything; 403 also tells action receipts it was not sent.
+    if (this.readOnly && !read) throw new ReadOnlyError();
+    const stale = read ? undefined : staleAfterWrite(url);
     // A write may land even if its response is lost, so invalidate first.
-    if (method !== "GET") this.cache.invalidate(staleAfterWrite(url));
+    if (stale) this.cache.invalidate(stale);
     const res = await this.#send(method, url, {}, body);
     if (!res.ok) throw new GitHubError(res.status, await errorMessage(res, `${method} ${path}`));
     // And again: a GET that raced the write may have cached the old state.
-    if (method !== "GET") this.cache.invalidate(staleAfterWrite(url));
+    if (stale) this.cache.invalidate(stale);
+    if (expectedStatus !== undefined && res.status !== expectedStatus) throw new Error(`Write not confirmed (expected HTTP ${expectedStatus}, received ${res.status}); check GitHub before retrying`);
     // Some writes succeed with no body: 204, and 205 from marking a
     // notification thread read. Parse only what is there.
     const text = await res.text();
     return (text === "" ? undefined : JSON.parse(text)) as T;
+  }
+
+  /** A GraphQL query's or mutation's data; GraphQL errors (sent with HTTP 200) are thrown. */
+  async graphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+    const r = await this.send<{ data?: T | null; errors?: { message?: string }[] }>("POST", "/graphql", { query, variables });
+    if (r.errors?.length) throw new Error(r.errors.map((e) => e.message ?? "GraphQL error").join("; "));
+    if (!r.data) throw new Error("GitHub returned no GraphQL data");
+    return r.data;
   }
 
   /** True when the rate budget is below `fraction` of its limit. */

@@ -1,0 +1,55 @@
+# The browser test as a dry run against live data (test/browser/app.spec.ts
+# with REVIEW_LIVE_TOKEN), so agents see what the signed-in page shows: its
+# status phrases and problem counts (test/e2e/live-report.ts) replace the
+# body of the tracking issue LIVE_REPORT_ISSUE. Off until the operator sets
+# that variable and, in the `live` environment limited to main, the
+# REVIEW_LIVE_TOKEN secret: a read-only token (read:project, read on the
+# bot-ops publication). Never on pull requests, where the head's code would
+# run with the secret. This repository is public and the token reads private
+# data, so the screenshots are not uploaded and the test's output, whose
+# failure messages quote the page, is discarded rather than logged.
+name: live
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live
+  cancel-in-progress: true
+
+jobs:
+  live:
+    # main only, as well as the environment's rule: a dispatch from another
+    # branch would run that branch's code with the secret.
+    if: vars.LIVE_REPORT_ISSUE != '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    environment: live
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci && npx playwright install --with-deps chromium
+      # Without the secret the test would pass on the fixtures instead.
+      - run: |
+          if [ -z "$REVIEW_LIVE_TOKEN" ]; then echo "REVIEW_LIVE_TOKEN is not set in the live environment" >&2; exit 1; fi
+          npm run test:browser > /dev/null 2>&1
+        env:
+          REVIEW_LIVE_TOKEN: ${{ secrets.REVIEW_LIVE_TOKEN }}
+      - if: always()
+        run: node test/e2e/post-live-report.ts dist/screenshots/live-report-desktop.md dist/screenshots/live-report-phone.md
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LIVE_REPORT_ISSUE: ${{ vars.LIVE_REPORT_ISSUE }}

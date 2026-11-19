@@ -57,8 +57,7 @@ export const FIELD = {
 } as const;
 
 /**
- * Board fields the triage view reads, by name. They are optional: a
- * board without them still loads, and the view says which are missing.
+ * Optional board fields retained in parsed items and CLI state.
  */
 export const TRIAGE_FIELD = {
   theme: "Theme",
@@ -67,12 +66,11 @@ export const TRIAGE_FIELD = {
 } as const;
 
 /**
- * Board fields the changes feed (boardfeed.ts) reads, by name; optional
- * too. Lead names the topic session that owns an item; News is the one
+ * Optional board fields. Lead names the topic session that owns an item; News is the one
  * dated line the coordinator writes when something notable happens to
  * it (`bot-board set --news` in homegit). Run is the devspace agent run
- * working on it (`bot-runs dispatch` sets it), which the active agents
- * strip reads too.
+ * working on it (`bot-runs dispatch` sets it), which the CLI's active
+ * agents read too.
  */
 export const FEED_FIELD = {
   lead: "Lead",
@@ -80,19 +78,8 @@ export const FEED_FIELD = {
   run: "Run",
 } as const;
 
-/** The Status of a finished item; the triage view shows everything else. */
+/** The Status of a finished item. */
 export const DONE = "Done";
-
-/**
- * The board's Theme options, in the order the triage view lists them;
- * others follow, by name. jmarrero's board has no Theme field yet, so
- * none are ranked.
- */
-export const TRIAGE_THEMES: readonly string[] = [];
-
-/** The board's Verdict options: keep it, merge it into its target, park it, or close it (for its target, if any). */
-export const VERDICTS = ["keep", "merge", "park", "close"] as const;
-export type Verdict = (typeof VERDICTS)[number];
 
 /**
  * The public repository where every board item that isn't an upstream
@@ -105,11 +92,6 @@ export const QUESTION_LABEL = "question";
 export const REVIEW_LABEL = "review";
 /** ... on an issue asking him for any other action. */
 export const CHORE_LABEL = "chore";
-/**
- * The label the bot adds to a question that is a triage decision, titled
- * "D<n>: ..." and listing the items it unblocks (see triage.ts).
- */
-export const DECISION_LABEL = "decision";
 /**
  * The label on an issue he files from the capture bar: the bot hasn't
  * triaged it yet. bot-notify in homegit routes his open issues carrying
@@ -171,38 +153,13 @@ export const PAGE_SIZE = 100;
 /** Comments shown in the item view. */
 export const RECENT_COMMENTS = 5;
 
-/**
- * The repositories whose merged PRs the news pane shows: the bot, its
- * runner, this app, the tracker's workflows and the bot machine's image.
- */
-export const NEWS_REPOS: readonly string[] = [
-  "jmarrero-forge/homegit",
-  "bootc-dev/jmarrero-devspace-sandbox",
-  "jmarrero/review",
-  "jmarrero-forge/tracker",
-  "jmarrero/atomic-setup",
-];
-/** Closed PRs read per repository (one page). */
-export const NEWS_PER_REPO = 30;
-/** News items shown. */
-export const NEWS_LIMIT = 40;
-
-/** The ops view: where devspaces and agent runs come from (bin/bot-devspace and bin/bot-runs in homegit). */
+/** Where agent runs come from (bin/bot-runs in homegit). */
 export const DEVSPACE_REPO = "bootc-dev/jmarrero-devspace-sandbox";
-export const DEVSPACE_WORKFLOW = "devspace.yml";
 export const AGENT_WORKFLOW = "agent.yml";
-/** A devspace's tailnet host is this plus its run id. */
-export const DEVSPACE_HOST_PREFIX = "jmarrero-devspace-";
 /** The Status of an item the bot is working on. */
 export const IN_PROGRESS = "In Progress";
-/** Refresh the ops view this often while it is open and the tab visible. */
+/** Refresh shared active state this often while the tab is visible. */
 export const OPS_POLL_INTERVAL_MS = 60_000;
-/** The ops view's history window, in hours. */
-export const OPS_WINDOW_HOURS = 24;
-/** Workflow runs listed per read (one page, the API maximum). */
-export const OPS_RUNS_PER_PAGE = 100;
-/** Agent runs shown when finished. */
-export const OPS_AGENT_RECENT = 6;
 /**
  * The coordinator's heartbeat: the one comment by BOT_LOGIN on this
  * TRACKER_REPO issue ("Bot heartbeat", pinned and locked), which
@@ -213,7 +170,7 @@ export const HEARTBEAT_ISSUE = 1;
  * The plan's usage is private: bin/bot-heartbeat keeps it in the one
  * comment by BOT_LOGIN on this issue ("Bot usage", locked) of a private
  * repository, read with the viewer's own token. Nothing of it is in the
- * build.
+ * build. The pass's holds snapshot (holds.ts) is another comment there.
  */
 export const USAGE_REPO = "jmarrero-forge/bot-ops";
 export const USAGE_ISSUE = 1;
@@ -221,16 +178,6 @@ export const USAGE_ISSUE = 1;
 export const HEARTBEAT_STALE_MS = 15 * 60_000;
 /** ... unless the coordinator said it sleeps longer, and this grace past its wake time hasn't run out. */
 export const HEARTBEAT_WAKE_GRACE_MS = 5 * 60_000;
-/** The bot's public events read (one page). */
-export const OPS_EVENTS = 50;
-/** Rows of bot activity shown. */
-export const OPS_EVENTS_SHOWN = 20;
-/**
- * How many agents the bot aims to keep working at once, split between
- * its harness and upstream (cgwalters-forge/tracker#267); the active
- * agents strip atop the queue shows the count against it.
- */
-export const AGENT_TARGET = 4;
 
 /** localStorage key for the chosen theme (auto, light, dark). */
 export const THEME_KEY = "review.theme";
@@ -242,11 +189,10 @@ export const CAPTURE_DRAFT_KEY = "review.capture.draft";
 export const TOKEN_KEY = "review.token";
 
 /**
- * What a classic token needs, by scope; each entry is met by any one of
+ * What a classic token needs for reads, by scope; each entry is met by any one of
  * its scopes. Shown on the sign-in page, and checked against the
  * X-OAuth-Scopes header once signed in.
  */
 export const CLASSIC_SCOPES = [
-  { any: ["public_repo", "repo"], why: "read PRs and post comments and reviews as you (repo only if you want private repositories too)" },
   { any: ["read:project", "project"], why: "read the Workstream board" },
 ] as const satisfies readonly { any: readonly string[]; why: string }[];

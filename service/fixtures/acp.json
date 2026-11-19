@@ -1,0 +1,24 @@
+{
+  "source": "Synthetic protocol replay derived from agentic-job bridge.rs at 283b1fd37b8ac2b5ad70121c5c02a0e0679d4f74 (PR #3319), not a live session capture.",
+  "exchanges": [
+    {
+      "client": {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}},
+      "server": [{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[],"agentInfo":{"name":"agentic-job","version":"fixture"}}}]
+    },
+    {
+      "client": {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/workspace","mcpServers":[]}},
+      "server": [{"jsonrpc":"2.0","id":2,"result":{"sessionId":"fixture-session"}}]
+    },
+    {
+      "client": {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"fixture-session","prompt":[{"type":"text","text":"Say hello"}]}},
+      "server": [
+        {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Hello"}}}},
+        {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
+      ]
+    },
+    {
+      "client": {"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"fixture-session"}},
+      "server": []
+    }
+  ]
+}

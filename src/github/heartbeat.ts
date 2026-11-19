@@ -13,7 +13,6 @@ import { HEARTBEAT_ISSUE, HEARTBEAT_STALE_MS, HEARTBEAT_WAKE_GRACE_MS, TRACKER_R
 /** The comment's first line. */
 export const HEARTBEAT_MARKER = "<!-- bot-heartbeat v1 -->";
 const SCHEMA = "bot-heartbeat/v1";
-const JSON_FENCE_RE = /^```json\n([\s\S]*?)\n```$/m;
 /** bot-heartbeat allows no more. */
 const MAX_WORKERS = 32;
 const ITEM_URL_RE = /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})\/(issues|pull)\/([1-9][0-9]{0,9})$/;
@@ -56,12 +55,25 @@ export interface RawComment {
   updated_at?: string;
 }
 
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const str = (v: unknown, re: RegExp): string | undefined => (typeof v === "string" && re.test(v) ? v : undefined);
-const time = (v: unknown): string | undefined => {
+// Shared by the bot's other comments (usage.ts, holds.ts), which are parsed the same way.
+export const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+export const str = (v: unknown, re: RegExp): string | undefined => (typeof v === "string" && re.test(v) ? v : undefined);
+export const time = (v: unknown): string | undefined => {
   const s = str(v, TIME_RE);
   return s && !Number.isNaN(Date.parse(s)) ? s : undefined;
 };
+
+/** The object in the ```json fence of a comment that starts with `marker`, or undefined. */
+export function fencedJson(body: string | null | undefined, marker: string): Record<string, unknown> | undefined {
+  const m = body?.startsWith(marker) ? /^```json\n([\s\S]*?)\n```$/m.exec(body) : null;
+  if (!m?.[1]) return undefined;
+  try {
+    const raw: unknown = JSON.parse(m[1]);
+    return isObject(raw) ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function parseWorker(raw: unknown): LocalWorker | undefined {
   if (!isObject(raw)) return undefined;
@@ -81,16 +93,8 @@ function parseWorker(raw: unknown): LocalWorker | undefined {
 
 /** The heartbeat in a comment's body, or undefined if it isn't one. Malformed workers are left out and counted. */
 export function parseHeartbeat(body: string | null | undefined): Heartbeat | undefined {
-  if (!body?.startsWith(HEARTBEAT_MARKER)) return undefined;
-  const m = JSON_FENCE_RE.exec(body);
-  if (!m?.[1]) return undefined;
-  let raw: unknown;
-  try {
-    raw = JSON.parse(m[1]);
-  } catch {
-    return undefined;
-  }
-  if (!isObject(raw) || raw.schema !== SCHEMA || !isObject(raw.coordinator) || !Array.isArray(raw.workers)) return undefined;
+  const raw = fencedJson(body, HEARTBEAT_MARKER);
+  if (!raw || raw.schema !== SCHEMA || !isObject(raw.coordinator) || !Array.isArray(raw.workers)) return undefined;
   const updatedAt = time(raw.updated_at);
   const session = str(raw.coordinator.session, NAME_RE);
   const loopState = str(raw.coordinator.loop_state, WORD_RE);

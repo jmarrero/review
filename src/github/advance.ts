@@ -6,12 +6,8 @@
 // check which entry comes next and when the app stays put.
 
 import { OPTIMISTIC_TTL_MS } from "./config.ts";
-import { applyFilter, type QueueFilter } from "./filter.ts";
 import { refKey, type Verdict, type VerdictState } from "./forge.ts";
-import type { Item } from "./board.ts";
 import type { VerdictEntry, WaitingPr } from "./prs.ts";
-import { type Entry, onBot } from "./queue.ts";
-import { type Decision, decisionLabel } from "./triage.ts";
 import { afterReview } from "./waiting.ts";
 
 /** One row of a list he steps through. */
@@ -35,49 +31,6 @@ export interface Origin {
   hash: string;
   stops: Stop[];
   live: () => Stop[];
-}
-
-/** The queue's rows under `filter`, children after their parent, as queueView lists them. */
-export function queueStops(entries: readonly Entry[], filter: QueueFilter): Stop[] {
-  return applyFilter(entries, filter).flatMap((e) =>
-    // A PR whose turn is the bot's is listed, but doesn't wait on him.
-    [e, ...(e.children ?? [])].map((x) => ({ key: x.key, href: x.href, title: x.title, waiting: x.settled !== true && !onBot(x) })),
-  );
-}
-
-export interface TriageLinks {
-  /** Where the triage view opens an item in the app; undefined when it opens on GitHub (no stop). */
-  opens: (item: Item) => string | undefined;
-  /** For an item without its own queue row (e.g. folded into its PR's): whether it's done from here. */
-  settled: (item: Item) => boolean;
-}
-
-/**
- * The triage view's rows that open in the app, in the order it lists
- * them (`order`, see triageOrder), waiting as their queue row says, if
- * they have one.
- */
-export function triageStops(order: readonly Item[], entries: readonly Entry[], links: TriageLinks): Stop[] {
-  const queued = new Map(entries.flatMap((e) => [e, ...(e.children ?? [])]).map((e) => [e.key, e]));
-  return order.flatMap((i) => {
-    const href = links.opens(i);
-    if (!href) return [];
-    const key = `item:${i.nodeId}`;
-    const e = queued.get(key);
-    return [{ key, href, title: i.title, waiting: e ? e.settled !== true && !onBot(e) : !links.settled(i) }];
-  });
-}
-
-/** The key of a decision's card, as a stop of the decisions view. */
-export const decisionKey = (d: Decision): string => `decision:${d.item.nodeId}`;
-
-/** A decision's name in the "Done: …" line, e.g. "D7: Pick a name". */
-export const decisionTitle = (d: Decision): string => `${decisionLabel(d)}: ${d.title}`;
-
-/** The decisions view's cards, in its order; answered ones are settled. All live on `hash`, answered in place. */
-export function decisionStops(decisions: readonly Decision[], answered: ReadonlySet<string>, hash: string): Stop[] {
-  // One without an issue has no form: nothing to move on to there.
-  return decisions.map((d) => ({ key: decisionKey(d), href: hash, title: decisionTitle(d), waiting: !answered.has(d.item.nodeId) && d.item.ref !== undefined }));
 }
 
 /**

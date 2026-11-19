@@ -1,0 +1,41 @@
+{
+  "schema": "agent-board/decision/v1",
+  "observed_at": "2026-11-13T12:00:00Z",
+  "validated_at": "2026-11-13T12:00:00Z",
+  "complete": false,
+  "holds_complete": false,
+  "failures": 0,
+  "provenance": {"producer": "board-forge/pass", "mode": "preview", "holds": "agent-board/holds/v1", "usage": "missing", "usage_computed_at": null},
+  "holds": [
+    {"item": "example/work#2", "url": "https://github.com/example/work/issues/2", "epic": false, "kind": "needs-human", "reason": "Choose the next step", "operator": true, "priority": "P2", "question": null, "carried": false},
+    {"item": "example/work#1", "url": "https://github.com/example/work/issues/1", "epic": false, "kind": "needs-design", "reason": "Choose a design", "operator": true, "priority": "P0", "question": null, "carried": false}
+  ],
+  "holds_omitted": 3,
+  "needs_you": {
+    "schema": "agent-board/needs-you/v2", "complete": true,
+    "validated_at": "2026-11-13T12:00:00Z", "changed_at": "2026-11-13T12:00:00Z",
+    "sources": {"items": "complete", "reviews": "off", "epics": "off", "proposals": "off", "digest": "off"},
+    "summaries": "complete", "omitted": 0, "count": 2,
+    "items": [
+      {"key": "example/work#2", "item": "example/work#2", "source": "items", "kind": "needs-human", "priority": "P2", "waiting_since": "2026-11-13T12:00:00Z", "ask": "Choose the next step", "recommendation": null, "action": {"type": "issue", "repository": "example/work", "number": 2}, "carried": false},
+      {"key": "example/work#1", "item": "example/work#1", "source": "items", "kind": "needs-design", "priority": "P0", "waiting_since": "2026-11-13T12:00:00Z", "ask": "Choose a design", "recommendation": null, "action": {"type": "issue", "repository": "example/work", "number": 1}, "carried": false}
+    ],
+    "act_now": [
+      {"key": "example/work#2", "unblocks": 1, "priority": "P2", "waiting_since": "2026-11-13T12:00:00Z", "action": {"type": "issue", "repository": "example/work", "number": 2}},
+      {"key": "example/work#1", "unblocks": 9, "priority": "P0", "waiting_since": "2026-11-13T12:00:00Z", "action": {"type": "issue", "repository": "example/work", "number": 1}}
+    ]
+  },
+  "work": {"schema": "agent-board/dispatchable-work/v1", "repositories": {"example/work": {
+    "reviews_complete": false, "issues_complete": false, "count": 2, "counts": {"held": 2}, "omitted": 0,
+    "items": [
+      {"item": "example/work#2", "kind": "held", "operator": true, "reason": "Choose the next step", "head": null, "taken": null, "plan_kind": null, "hold_kind": "needs-human", "carried": false},
+      {"item": "example/work#1", "kind": "held", "operator": true, "reason": "Choose a design", "head": null, "taken": null, "plan_kind": null, "hold_kind": "needs-design", "carried": false}
+    ]
+  }}},
+  "wip": {"limit": 8, "in_flight": null},
+  "candidates": null,
+  "preview_starts": {},
+  "confirmed_effects": {"comments_created": 0, "comments_edited": 0, "starts": {}, "starts_by_pool": {}},
+  "pools": [{"name": "test", "evidence": "missing", "hold": null, "reason": null, "used_percent": null, "allowed_percent": null, "observed_at": null, "resets_at": null}],
+  "pools_omitted": 0
+}

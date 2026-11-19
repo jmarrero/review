@@ -1,0 +1,9 @@
+{
+  "schema": "agent-board/pass-view/v1",
+  "observed_at": "2026-11-05T12:00:00Z",
+  "complete": true,
+  "omitted": 0,
+  "passes": [{"at":"2026-11-05T12:00:00Z","result":"success","sections":[],"started":[{"item":"o/work#11","kind":"implement","pool":"claude","run":{"repository":"o/runner","id":42}}],"reasons":[],"omitted":0}],
+  "pools": [{"name":"claude","used_percent":45,"allowed_percent":50,"resets_at":"2026-11-05T13:00:00Z","ready":null,"under_pace":true}],
+  "in_flight": [{"state":"running","item":"o/work#9","kind":"fix","pool":"openai","run":{"repository":"o/runner","id":41},"started_at":"2026-11-05T11:40:00Z"}]
+}

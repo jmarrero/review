@@ -8,16 +8,16 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src https://api.github.com; img-src 'self'; manifest-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types dompurify">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
-<title>Review queue</title>
+<title>Control app</title>
 <link rel="stylesheet" href="style.css">
 <script type="module" src="app.js"></script>
 </head>
 <body>
 <div class="wrap">
   <header class="top">
-    <h1><a href="#">Needs you</a></h1>
+    <h1><a href="#inbox">Control app</a></h1>
     <span class="meta" id="meta">Starting…</span>
-    <!-- On a narrow screen the controls fold into a menu; on a wide one, the toggle is hidden and they sit in the header. -->
+    <!-- Every control, with who is signed in and the counts, behind one ⋯ menu. -->
     <button type="button" id="menu-toggle" class="small menu-toggle" aria-label="More" aria-expanded="false" aria-controls="menu">⋯</button>
     <div class="menu" id="menu">
       <span class="meta menu-meta" id="menu-meta"></span>
@@ -25,10 +25,13 @@
       <button type="button" id="theme" class="small">Theme</button>
       <a href="#state.json" id="state-link" class="small" hidden>state.json</a>
       <button type="button" id="copy-state" class="small" hidden>Copy state</button>
+      <button type="button" id="writes" class="small" hidden>Read-only · Enable writes</button>
       <button type="button" id="signout" class="small" hidden>Sign out</button>
     </div>
+    <!-- A tab per view (shell.ts), under the title in the sticky header. -->
+    <nav class="views" id="views" aria-label="Views" hidden></nav>
   </header>
-  <!-- The session chat (chat.ts), first under the header; it stays hidden unless chat-config.json enables it. -->
+  <!-- The chat drawer (chat.ts); opened only from Needs you. -->
   <div id="chat" hidden></div>
   <!-- The "Ask anything" box: it files a note onto the board (captureview.ts). -->
   <div class="ask-box" id="ask">

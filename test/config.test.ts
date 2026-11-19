@@ -26,13 +26,8 @@ describe("config: the board", () => {
     assert.equal(new Set(names).size, names.length);
   });
 
-  it("lists each Theme and Verdict once", () => {
-    assert.equal(new Set(config.TRIAGE_THEMES).size, config.TRIAGE_THEMES.length);
-    assert.deepEqual([...config.VERDICTS], ["keep", "merge", "park", "close"]);
-  });
-
   it("uses distinct ask labels", () => {
-    const labels = [config.QUESTION_LABEL, config.REVIEW_LABEL, config.CHORE_LABEL, config.DECISION_LABEL, config.CAPTURE_LABEL];
+    const labels = [config.QUESTION_LABEL, config.REVIEW_LABEL, config.CHORE_LABEL, config.CAPTURE_LABEL];
     assert.equal(new Set(labels).size, labels.length);
   });
 
@@ -49,12 +44,11 @@ describe("config: the board", () => {
 describe("config: repositories", () => {
   const repo = /^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/;
   it("names each as owner/repo", () => {
-    for (const r of [config.TRACKER_REPO, config.DEVSPACE_REPO, config.USAGE_REPO, ...config.NEWS_REPOS]) assert.match(r, repo);
-    assert.equal(new Set(config.NEWS_REPOS).size, config.NEWS_REPOS.length);
+    for (const r of [config.TRACKER_REPO, config.DEVSPACE_REPO, config.USAGE_REPO]) assert.match(r, repo);
   });
 
   it("names the agent workflows as files", () => {
-    for (const w of [config.DEVSPACE_WORKFLOW, config.AGENT_WORKFLOW]) assert.match(w, /^[\w-]+\.ya?ml$/);
+    assert.match(config.AGENT_WORKFLOW, /^[\w-]+\.ya?ml$/);
   });
 
   it("points at real issues", () => {
@@ -70,7 +64,7 @@ describe("config: timing and limits", () => {
   });
 
   it("stays within GitHub's page and rate limits", () => {
-    assert.ok(config.PAGE_SIZE <= 100 && config.OPS_RUNS_PER_PAGE <= 100);
+    assert.ok(config.PAGE_SIZE <= 100);
     assert.ok(config.FETCH_CONCURRENCY >= config.GITHUB_CONCURRENCY, "the client caps verdict fetches anyway");
     assert.ok(config.RATE_LIMIT_WAIT_MS >= 60_000);
     assert.ok(config.RATE_LOW_FRACTION > 0 && config.RATE_LOW_FRACTION < 1);
@@ -81,7 +75,6 @@ describe("config: timing and limits", () => {
     assert.ok(config.POLL_SLOW_MS < config.POLL_STALL_MS);
     assert.ok(config.FORGE_MIN_INTERVAL_MS <= config.FORGE_POLL_INTERVAL_MS);
     assert.ok(config.HEARTBEAT_WAKE_GRACE_MS < config.HEARTBEAT_STALE_MS);
-    assert.ok(config.OPS_EVENTS_SHOWN <= config.OPS_EVENTS);
   });
 });
 
@@ -92,12 +85,12 @@ describe("config: storage and tokens", () => {
     for (const k of keys) assert.match(k, /^review\./);
   });
 
-  it("asks a classic token for a scope per need", () => {
+  it("asks a classic token only for read scopes at sign-in", () => {
     for (const s of config.CLASSIC_SCOPES) {
       assert.ok(s.any.length > 0 && s.why);
     }
     const all = config.CLASSIC_SCOPES.flatMap((s) => [...s.any]);
-    assert.ok(all.includes("read:project") && all.includes("public_repo"));
+    assert.deepEqual(all, ["read:project", "project"]);
   });
 
   // The file is published with the app ("Public names only"): a token

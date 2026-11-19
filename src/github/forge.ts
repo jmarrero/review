@@ -108,12 +108,25 @@ export function isForgeDraft(pr: ForgePr): boolean {
   return pr.draft && pr.ref.owner.toLowerCase() === FORGE_ORG.toLowerCase();
 }
 
+/**
+ * Why bot-pr would not promote this PR on a plain `/promote`: only the
+ * bot's PRs in the forge naming an upstream are promoted, and a human-text
+ * upstream wants his text first (Make it mine).
+ */
+export function promoteProblem(pr: Pick<ForgePr, "ref" | "author" | "body">): string | undefined {
+  if (pr.author !== BOT_LOGIN || pr.ref.owner.toLowerCase() !== FORGE_ORG.toLowerCase()) return `not a ${BOT_LOGIN} PR in ${FORGE_ORG}, which bot-pr promotes`;
+  const meta = parseBotMeta(pr.body);
+  if (!meta.upstream) return "its description names no upstream for bot-pr";
+  return meta.policy === "human-text" ? HUMAN_TEXT_PROBLEM : undefined;
+}
+
+const HUMAN_TEXT_PROBLEM = "its upstream wants your text: use Make it mine in the PR pane";
+
 /** The next operator action for an approved fork, until /promote is sent. */
 export function promotionAction(pr: ForgePr, verdict: Verdict | undefined): "promote" | "write" | undefined {
-  if (verdict?.state !== "approved" || pr.author !== BOT_LOGIN || pr.ref.owner.toLowerCase() !== FORGE_ORG.toLowerCase()) return undefined;
-  const meta = parseBotMeta(pr.body);
-  if (!meta.upstream) return undefined;
-  return meta.policy === "human-text" ? "write" : "promote";
+  if (verdict?.state !== "approved") return undefined;
+  const problem = promoteProblem(pr);
+  return problem === HUMAN_TEXT_PROBLEM ? "write" : problem ? undefined : "promote";
 }
 
 /** The body as it will read upstream: without the bot-meta section. */

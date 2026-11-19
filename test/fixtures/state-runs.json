@@ -1,6 +1,0 @@
-{
-  "workflow_runs": [
-    { "id": 101, "html_url": "https://github.com/bootc-dev/jmarrero-devspace-sandbox/actions/runs/101", "display_title": "Agent: investigate build regression", "status": "in_progress", "created_at": "2026-10-02T10:00:00Z", "run_started_at": "2026-10-02T10:00:00Z", "run_attempt": 2, "actor": { "login": "jmarrero-bot" } },
-    { "id": 102, "html_url": "https://github.com/bootc-dev/jmarrero-devspace-sandbox/actions/runs/102", "display_title": "Agent: review patch [tokens=1200; cost=$0.25]", "status": "completed", "conclusion": "success", "created_at": "2026-10-02T10:00:00Z", "run_started_at": "2026-10-02T10:00:00Z", "updated_at": "2026-10-02T11:00:00Z", "run_attempt": 2 }
-  ]
-}

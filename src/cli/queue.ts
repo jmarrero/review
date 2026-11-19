@@ -10,7 +10,7 @@ import { type Fetch, GitHub, GitHubError } from "../github/api.ts";
 import { loadAnswered, loadQueue } from "../github/backend.ts";
 import { ALL, applyFilter, entryOrg, NO_ORG, parseFilterToken, type QueueFilter } from "../github/filter.ts";
 import type { ForgePr, Verdict } from "../github/forge.ts";
-import { queueJson, queueText, SCHEMA } from "../github/export.ts";
+import { queueJson, queueText, SCHEMA } from "./export.ts";
 import { loadForgePrs, loadOtherPrs, loadWaiting, refreshVerdicts, searchBotPrs, type WaitingPr } from "../github/prs.ts";
 import { buildEntries, type Entry } from "../github/queue.ts";
 
@@ -23,7 +23,7 @@ const GITHUB_HOST = "github.com";
 
 export const USAGE = `Usage: ${PROG} [--json | --text] [--filter FILTER]
 
-Print what is waiting on jmarrero (the review app's queue), ranked as the
+Print what is waiting on jmarrero (the control app's queue), ranked as the
 app ranks it: P0 first, then the oldest; answered asks, then PRs waiting
 on the bot, last.
 

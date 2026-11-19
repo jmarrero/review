@@ -4,6 +4,7 @@
 // text nodes only.
 
 import { h, kids, link, scrollTo } from "../dom.ts";
+import { dispatchChatButton } from "./chatitem.ts";
 import type { Renderer } from "../markdown.ts";
 import type { IssueRef } from "./board.ts";
 import { BOARD_URL, BOT_LOGIN, FORGE_ORG } from "./config.ts";
@@ -39,7 +40,7 @@ import {
   viewedKey,
 } from "./store.ts";
 import type { RunStatus } from "./backend.ts";
-import { type ContextHooks, pill, runView, time } from "./view.ts";
+import { ageLabel, agoLabel, type ContextHooks, pill, runView } from "./view.ts";
 import type { PrReason, PrWait } from "./waiting.ts";
 
 export { FILE_CLASS };
@@ -286,7 +287,7 @@ function reviewForm(d: PrDetail, opts: PrViewOptions, handlers: PrViewHandlers, 
     for (const c of list) {
       const go = h("button", { type: "button", class: "linkish" }, `${c.path}:${c.start_line !== undefined ? `${c.start_line}–` : ""}${c.line}${c.side === "LEFT" ? " (old)" : ""}${c.commit !== d.head ? ` @${c.commit.slice(0, 7)}` : ""}`);
       go.addEventListener("click", () => hooks.jump(c));
-      ul.append(h("li", {}, go, h("span", { class: "tag" }, ` ${c.body.replace(/\s+/g, " ").slice(0, 80)}`)));
+      ul.append(h("li", {}, go, h("span", { class: "tag" }, ` ${c.body.replace(/\s+/g, " ")}`)));
     }
     drafts.append(h("p", { class: "tag" }, `${list.length} line comment${list.length > 1 ? "s" : ""} will go out with your review:`), ul);
   };
@@ -370,7 +371,7 @@ function commitsSection(d: PrDetail): HTMLElement {
     const det = h(
       "details",
       { class: "commit" },
-      h("summary", {}, h("code", {}, short(c.sha)), " ", h("span", { class: "subject" }, subject), h("span", { class: "tag" }, ` ${c.author}${c.date ? ` · ${time(c.date)}` : ""}`)),
+      h("summary", {}, h("code", {}, short(c.sha)), " ", h("span", { class: "subject" }, subject), h("span", { class: "tag" }, ` ${c.author}`, c.date ? h("span", {}, " · ", ageLabel(c.date, Date.now())) : null)),
       body ? h("pre", { class: "msg" }, body) : h("p", { class: "note" }, "(no body)"),
       h("p", { class: "note" }, link(c.url, "commit on GitHub")),
     );
@@ -555,6 +556,7 @@ class Pane implements PrPane {
         verdict ? h("span", { class: `state v-${d.verdict.state}` }, d.verdict.url ? link(d.verdict.url, verdict) : verdict) : null,
       ),
       h("h2", {}, d.title),
+      dispatchChatButton(d.url, d.title),
       linkRow(d, entry),
       ...d.warnings.map((w) => h("p", { class: "warn" }, w)),
       entry?.item?.why ? h("section", {}, h("h3", {}, "Why (board)"), h("div", { class: "md" }, render(entry.item.why))) : null,
@@ -828,7 +830,9 @@ class Pane implements PrPane {
     const note = h(
       "p",
       { class: "note" },
-      `Advice from ${BOT_LOGIN}'s reviewer, written for ${short(guide.head)}${g.at ? ` (${time(g.at)})` : ""}: where it thinks this PR needs a close read. It doesn't replace reading the diff. `,
+      `Advice from ${BOT_LOGIN}'s reviewer, written for ${short(guide.head)}`,
+      g.at ? h("span", {}, " (", agoLabel(g.at, Date.now()), ")") : "",
+      ": where it thinks this PR needs a close read. It doesn't replace reading the diff. ",
       link(g.url, "the review"),
     );
     const children: HTMLElement[] = [head, note];

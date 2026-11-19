@@ -41,7 +41,7 @@ describe("dcoFailing", () => {
 
 describe("unsignedCommits", () => {
   const HIM = { name: "Joseph Marrero Corchado", email: "jmarrero@redhat.com" };
-  const BOT = { name: "Joseph Marrero Corchado", email: "jmarrero+llm@gmail.com" };
+  const BOT = { name: "Joseph Marrero Corchado", email: "jmarrero+bot@gmail.com" };
   const commit = (sha: string, message: string, author = BOT, committer = HIM): RawPrCommit => ({ sha: sha.repeat(40), commit: { message, author, committer } });
   const signed = `fix: It\n\nGenerated-by: AI\n${signoffTrailer()}\n`;
   const cases: [string, RawPrCommit, boolean][] = [

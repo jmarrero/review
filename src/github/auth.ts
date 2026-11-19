@@ -3,8 +3,7 @@
 // token. It stays in this browser, in sessionStorage (gone with the tab)
 // or, if you ask, localStorage, and is only ever sent to api.github.com
 // (the GitHub client refuses other URLs, and the CSP's connect-src allows
-// no other origin). The token-mediating relay of §3 remains the target;
-// it would replace this module.
+// no other origin). No authentication service is needed.
 
 import { TOKEN_KEY } from "./config.ts";
 

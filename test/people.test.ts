@@ -8,13 +8,13 @@ import type { Recorded, Scripted } from "./helpers.ts";
 const data = JSON.parse(readFileSync(new URL("fixtures/people.json", import.meta.url), "utf8")) as { search: PeopleSubject[]; notifications: PeopleNotification[]; timelines: Record<string, PeopleEvent[]> };
 const now = Date.parse("2026-10-04T00:00:00Z");
 
-function client(options: { notificationsStatus?: number; searchStatus?: number; failedThread?: number; failedTimeline?: number; failedCI?: boolean; truncatedCI?: boolean; notifications?: PeopleNotification[]; paginated?: boolean; threads?: Record<number, { subject: Partial<PeopleSubject>; timeline: PeopleEvent[] }> } = {}) {
+function client(options: { notificationsStatus?: number; searchStatus?: number; searchPages?: Scripted[]; failedThread?: number; failedTimeline?: number; failedCI?: boolean; truncatedCI?: boolean; notifications?: PeopleNotification[]; paginated?: boolean; threads?: Record<number, { subject: Partial<PeopleSubject>; timeline: PeopleEvent[] }> } = {}) {
   const calls: Recorded[] = [];
   const route = (method: string, url: string): Scripted | undefined => {
     const path = new URL(url).pathname;
     // GitHub answers "mark a thread as read" with 205 and no body.
     if (method === "PATCH") return { status: 205 };
-    if (path === "/search/issues") return options.searchStatus ? { status: options.searchStatus } : { body: { items: data.search } };
+    if (path === "/search/issues") return options.searchPages?.[Number(new URL(url).searchParams.get("page")) - 1] ?? (options.searchStatus ? { status: options.searchStatus } : { body: { items: data.search } });
     if (path === "/notifications") {
       if (options.notificationsStatus) return { status: options.notificationsStatus, body: { message: "notifications denied" } };
       const notifications = options.notifications ?? data.notifications;
@@ -49,6 +49,33 @@ function client(options: { notificationsStatus?: number; searchStatus?: number; 
 }
 
 describe("From people loader", () => {
+  for (const failure of [{ status: 403 }, { status: 500 }, { body: {} }]) {
+    for (const notifications of [false, true]) it(`retains earlier review requests after a later search page fails (${JSON.stringify(failure)}, notifications=${notifications})`, async () => {
+      const { gh, calls } = client({ searchPages: [{ body: { items: Array(100).fill(data.search[0]) } }, failure] });
+      const people = await loadPeople(gh, now, notifications);
+      const request = people.rows.find((r) => r.key === "upstream/widget#1");
+      assert.ok(request);
+      assert.equal(request.reviewRequested, true);
+      assert.equal(request.action, "Review");
+      assert.equal(request.ci, "success");
+      assert.deepEqual(request.notificationIds, notifications ? ["101"] : []);
+      assert.match(people.warnings.join(" "), /Review-request search unavailable/);
+      assert.equal(calls.filter((c) => new URL(c.url).pathname === "/search/issues").length, 2);
+      assert.ok(calls.every((c) => c.method === "GET"));
+    });
+  }
+
+  it("continues through successful search pages and deduplicates overlapping requests", async () => {
+    const { gh, calls } = client({ searchPages: [
+      { body: { items: Array(100).fill(data.search[0]) } },
+      { body: { items: [data.search[0], { ...data.search[0], number: 2, html_url: "https://github.com/upstream/widget/pull/2" }] } },
+    ] });
+    const people = await loadPeople(gh, now, false);
+    assert.deepEqual(people.rows.map((r) => r.key), ["upstream/widget#1", "upstream/widget#2"]);
+    assert.deepEqual(people.warnings, []);
+    assert.equal(calls.filter((c) => new URL(c.url).pathname === "/search/issues").length, 2);
+  });
+
   it("merges human review search with recent participating asks, excluding bot-only and unknown activity", async () => {
     const { gh, calls } = client();
     const people = await loadPeople(gh, now);

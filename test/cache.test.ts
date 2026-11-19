@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { IDBFactory } from "fake-indexeddb";
 import { CacheMiss, type Fetch, GitHub } from "../src/github/api.ts";
 import { loadQueue } from "../src/github/backend.ts";
-import { cachedLabel, type CacheOptions, type EntryMeta, forgetCache, openCache, type PersistentStore, ResponseCache, staleAfterWrite, tokenHash } from "../src/github/cache.ts";
+import { type CacheOptions, type EntryMeta, forgetCache, openCache, type PersistentStore, ResponseCache, staleAfterWrite, tokenHash } from "../src/github/cache.ts";
 import { composeReview } from "../src/github/forge.ts";
 import { deleteCacheDatabase, IdbStore } from "../src/github/idbstore.ts";
 import { submitReview } from "../src/github/prs.ts";
@@ -330,19 +330,6 @@ describe("the approve guard", () => {
     );
     await assert.rejects(submitReview(later.gh.cacheOnly(), ref, composeReview("approve", "", HEAD)), /cache-only client/);
   });
-});
-
-describe("cachedLabel", () => {
-  const cases: [number, string][] = [
-    [0, "cached · just now"],
-    [59_000, "cached · just now"],
-    [5 * 60_000, "cached · 5 min ago"],
-    [119 * 60_000, "cached · 119 min ago"],
-    [3 * 3600_000, "cached · 3 h ago"],
-    [3 * DAY, "cached · 3 d ago"],
-    [-60_000, "cached · just now"],
-  ];
-  for (const [ago, want] of cases) it(want, () => assert.equal(cachedLabel(T0 - ago, T0), want));
 });
 
 describe("staleAfterWrite", () => {

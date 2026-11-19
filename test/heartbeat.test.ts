@@ -31,7 +31,7 @@ describe("findHeartbeat", () => {
         { name: "bootc-2482", itemUrl: "https://github.com/bootc-dev/bootc/issues/2482", itemRef: "bootc-dev/bootc#2482", startedAt: "2026-09-28T15:01:30Z", status: "starting" },
       ],
       skipped: 0,
-      commentUrl: "https://github.com/jmarrero-forge/tracker/issues/1#issuecomment-2",
+      commentUrl: "https://github.com/jmarrero-forge/tracker/issues/176#issuecomment-2",
     });
   });
   it("finds nothing among others' comments", () => assert.equal(findHeartbeat(comments().slice(0, 1)), undefined));

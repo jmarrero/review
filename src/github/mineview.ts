@@ -14,7 +14,6 @@ import {
   HUMAN_TEXT_LINE,
   type Identity,
   identityProblem,
-  lineDiff,
   type MineEdit,
   mineRefusal,
   type MineResult,
@@ -23,6 +22,7 @@ import {
   WORKFLOWS_DIR,
   workflowScopeProblem,
 } from "./mine.ts";
+import { lineDiffView } from "./diffview.ts";
 import type { PrDetail } from "./prs.ts";
 import { load, save } from "./store.ts";
 
@@ -62,12 +62,7 @@ function diffBlock(c: Change): HTMLElement {
   const head = h("h4", {}, c.what);
   if (!c.changed) return h("div", { class: "mine-change" }, head, h("p", { class: "note" }, "unchanged"));
   if (c.before === c.after) return h("div", { class: "mine-change" }, head, h("p", { class: "note" }, "only whitespace changes (line endings, or blank lines at the end or before the bot-meta section)"));
-  const pre = h("pre", { class: "mine-diff" });
-  for (const l of lineDiff(c.before, c.after)) {
-    const mark = l.kind === "add" ? "+" : l.kind === "del" ? "-" : " ";
-    pre.append(h("span", { class: `d-${l.kind}` }, `${mark} ${l.text}`));
-  }
-  return h("div", { class: "mine-change" }, head, pre);
+  return h("div", { class: "mine-change" }, head, lineDiffView(c.before, c.after));
 }
 
 /** The form, or a note saying why this PR can't be taken over here. */

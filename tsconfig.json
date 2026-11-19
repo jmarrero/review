@@ -16,5 +16,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "build.ts"]
+  "include": ["src", "test", "build.ts", "build-docs.ts", "playwright.config.ts"]
 }

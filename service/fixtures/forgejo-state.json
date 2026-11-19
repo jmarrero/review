@@ -1,0 +1,51 @@
+{
+  "items": [
+    {
+      "repository": "infra/cluster",
+      "number": 41,
+      "url": "https://forge.example/infra/cluster/pulls/41",
+      "title": "Bump the ingress controller",
+      "pullRequest": true,
+      "draft": false,
+      "labels": [],
+      "reason": "review-requested",
+      "updatedAt": "2026-11-10T10:00:00Z"
+    },
+    {
+      "repository": "infra/dns",
+      "number": 12,
+      "url": "https://forge.example/infra/dns/issues/12",
+      "title": "Rotate the backup key",
+      "pullRequest": false,
+      "draft": false,
+      "labels": ["needs operator"],
+      "reason": "labeled",
+      "updatedAt": "2026-11-10T09:00:00Z"
+    },
+    {
+      "repository": "infra/cluster",
+      "number": 40,
+      "url": "https://forge.example/infra/cluster/issues/40",
+      "title": "Upgrade blocked on storage",
+      "pullRequest": false,
+      "draft": false,
+      "labels": ["blocked", "storage"],
+      "reason": "labeled",
+      "updatedAt": "2026-11-09T18:00:00Z"
+    },
+    {
+      "repository": "homelab/media",
+      "number": 5,
+      "url": "https://forge.example/homelab/media/pulls/5",
+      "title": "WIP: Add a media server",
+      "pullRequest": true,
+      "draft": true,
+      "labels": [],
+      "reason": "review-requested",
+      "updatedAt": "2026-11-06T10:00:00Z"
+    }
+  ],
+  "complete": true,
+  "readAt": "2026-11-10T12:00:00Z",
+  "error": null
+}

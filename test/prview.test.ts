@@ -4,7 +4,9 @@
 // the bot keys on.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
+import { JSDOM, VirtualConsole } from "jsdom";
 import type { DraftComment, ReviewAction } from "../src/github/forge.ts";
 import type { GuideState } from "../src/github/guide.ts";
 import type { PrDetail } from "../src/github/prs.ts";
@@ -13,7 +15,7 @@ import { buildTree, canReview, hotspotsFor, movedFrom, type PrViewHandlers, prVi
 import type { Entry } from "../src/github/queue.ts";
 import type { PrWait } from "../src/github/waiting.ts";
 import { createRenderer } from "../src/markdown.ts";
-import { installDom } from "./helpers.ts";
+import { fields, installDom } from "./helpers.ts";
 
 const win = installDom();
 const render = createRenderer(win as unknown as Parameters<typeof createRenderer>[0]);
@@ -87,6 +89,7 @@ const codeRows = (root: Element) =>
 describe("prView", () => {
   it("shows untrusted text as text, and drops the bot-meta section", () => {
     const { el } = pane(detail());
+    assert.equal(el.querySelector("button.item-chat"), null);
     assertNoActiveContent(el);
     const text = el.textContent ?? "";
     assert.ok(text.includes(`widget: ${EVIL}`));
@@ -643,4 +646,84 @@ describe("pane helpers", () => {
     assert.equal(unseenNote({ unopened: names, noDiff: 0, truncated: false }), " Not seen here: 8 files never expanded (f0, f1, f2, f3, f4, f5, +2 more).");
     assert.equal(unseenNote({ unopened: [], noDiff: 0, truncated: false }), "");
   });
+});
+
+// Exercise the real entry point with a PR ready before the publication, not just prView.
+for (const fails of [false, true]) it(`preserves unsent PR reviews when the publication ${fails ? "fails" : "loads"} late`, async () => {
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("jsdomError", (error: Error) => {
+    if (!error.message.startsWith("Not implemented: navigation")) throw error;
+  });
+  const dom = new JSDOM(readFileSync(new URL("../static/index.html", import.meta.url), "utf8"), {
+    url: "https://review.example/#pr/jmarrero-forge/widget/7", pretendToBeVisual: true, virtualConsole,
+  });
+  const { window } = dom;
+  window.scrollTo = () => {};
+  let releaseQueue = () => {};
+  const queueReady = new Promise<void>((resolve) => { releaseQueue = resolve; });
+  let queueFinished = false;
+  const requests: string[] = [];
+  Object.assign(globalThis, {
+    window, document: window.document, Node: window.Node, HTMLElement: window.HTMLElement,
+    ResizeObserver: class { observe() {} disconnect() {} },
+    fetch: async (input: string) => {
+      const path = new URL(input).pathname;
+      requests.push(path);
+      if (path === "/repos/jmarrero-forge/bot-ops/issues/1/comments") {
+        await queueReady;
+        queueFinished = true;
+        if (fails) return Response.json({ message: "Queue unavailable" }, { status: 503 });
+      }
+      let body: unknown = [];
+      if (path === "/user") body = { login: "jmarrero" };
+      else if (path.endsWith("/fields")) body = fields();
+      else if (path === "/search/issues") body = { items: [], total_count: 0 };
+      else if (path === "/graphql") body = { data: {} };
+      else if (path === "/repos/jmarrero-forge/widget/pulls/7") body = {
+        number: 7, html_url: "https://github.com/jmarrero-forge/widget/pull/7", title: "widget: Fix it", body: "Body", draft: true, state: "open",
+        user: { login: "jmarrero-bot" }, head: { sha: HEAD, ref: "bot/fix" }, base: { ref: "main" }, additions: 1, deletions: 1, changed_files: 1, commits: 1,
+      };
+      else if (path.endsWith("/pulls/7/commits")) body = [{ sha: HEAD, commit: { message: "Fix it" }, parents: [{ sha: BASE }], author: { login: "jmarrero-bot" } }];
+      else if (path.endsWith("/pulls/7/files")) body = [{ filename: "a.rs", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@\n-old\n+new" }];
+      else if (path.endsWith("/check-runs")) body = { check_runs: [] };
+      else if (path.endsWith("/status")) body = { statuses: [] };
+      else if (path === "/repos/jmarrero-forge/widget") body = {};
+      return Response.json(body);
+    },
+  });
+  const until = async (check: () => boolean) => {
+    for (let i = 0; i < 200; i++) {
+      if (check()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail(`Timed out: ${window.document.querySelector("#view")?.textContent}`);
+  };
+  try {
+    await import(`../src/github/main.ts?early-pr=${fails}`);
+    await until(() => !!window.document.querySelector(".signin"));
+    window.document.querySelector<HTMLInputElement>(".signin input[type=password]")!.value = ["ghp", "x".repeat(24)].join("_");
+    window.document.querySelector(".signin")!.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    await until(() => !!window.document.querySelector("form.review textarea"));
+    assert.equal(queueFinished, false);
+    const review = window.document.querySelector<HTMLTextAreaElement>("form.review textarea")!;
+    review.value = "Keep this unsent review";
+    window.document.querySelectorAll<HTMLElement>("tr.add td.ln")[1]!.click();
+    const inline = window.document.querySelector<HTMLTextAreaElement>("tr.composer textarea")!;
+    assert.ok(inline);
+    inline.value = "Keep this unsent inline comment";
+    releaseQueue();
+    await until(() => queueFinished);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(window.document.querySelector("form.review textarea"), review);
+    assert.equal(review.value, "Keep this unsent review");
+    assert.equal(window.document.querySelector("tr.composer textarea"), inline);
+    assert.equal(inline.value, "Keep this unsent inline comment");
+    assert.ok(!requests.some((path) => path.includes("/actions/") || path.endsWith("/events")), "no removed workflow or activity polling");
+    assert.ok(!requests.some((path) => path.endsWith("/items") || path === "/search/issues"), "no background board or search discovery");
+  } finally {
+    releaseQueue();
+    window.document.querySelector<HTMLButtonElement>("#signout")?.click();
+    await tick();
+    dom.window.close();
+  }
 });

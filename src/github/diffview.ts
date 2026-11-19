@@ -7,6 +7,7 @@
 // so a PR with thousands of changed lines opens as fast as a small one.
 
 import { h, kids, link } from "../dom.ts";
+import { lineDiff } from "./diff.ts";
 import {
   displayItems,
   hiddenParts,
@@ -670,4 +671,11 @@ export class FileView {
   rowEl(item: number): HTMLTableRowElement | undefined {
     return this.#rowEls.get(item);
   }
+}
+
+/** A whole-text line diff, one line each marked +, - or space. */
+export function lineDiffView(before: string, after: string): HTMLElement {
+  const pre = h("pre", { class: "line-diff" });
+  for (const l of lineDiff(before, after)) pre.append(h("span", { class: `d-${l.kind}` }, `${l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "} ${l.text}`));
+  return pre;
 }

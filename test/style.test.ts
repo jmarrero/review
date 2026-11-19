@@ -7,6 +7,25 @@ import { JSDOM } from "jsdom";
 
 const css = readFileSync(new URL("../static/style.css", import.meta.url), "utf8");
 
+it("never truncates titles or other display text with ellipsis or line clamps", () => {
+  assert.doesNotMatch(css, /text-overflow\s*:\s*ellipsis|(?:-webkit-)?line-clamp\s*:/);
+  for (const selector of [".row .title", "button.tfile .tname"]) {
+    const rule = css.slice(css.indexOf(`${selector} {`)).split("}")[0]!;
+    assert.match(rule, /overflow-wrap:\s*anywhere/);
+    assert.doesNotMatch(rule, /white-space:\s*nowrap|overflow:\s*hidden/);
+  }
+});
+
+it("uses the design's type scale and pairwise theme tokens", () => {
+  for (const [name, size] of Object.entries({ meta: 12, secondary: 13, body: 15, card: 16, view: 20, metric: 28 })) {
+    assert.match(css, new RegExp(`--type-${name}: ${size}px`));
+  }
+  assert.doesNotMatch(css, /font(?:-size)?:[^;}]*\b(?:11|14|18|26)px/);
+  assert.match(css, /--surface-2: #eef1f5/);
+  assert.equal(css.match(/--surface-2: #1c2532/g)?.length, 2);
+  assert.equal(css.match(/--live: #6fcf97/g)?.length, 2);
+});
+
 // jsdom's getComputedStyle ignores !important and specificity, so read the CSSOM instead.
 function floorRules(win: JSDOM["window"]): CSSStyleRule[] {
   const rules: CSSStyleRule[] = [];

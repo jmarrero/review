@@ -13,6 +13,7 @@ import {
   OTHER_QUERY,
   refreshVerdicts,
   REQUESTED_QUERY,
+  searchBotPrs,
   submitReview,
   type VerdictEntry,
 } from "../src/github/prs.ts";
@@ -47,6 +48,38 @@ function pull(over: Record<string, unknown> = {}) {
 }
 
 describe("loadForgePrs", () => {
+  for (const body of [null, {}, { items: null }, { items: {} }, { items: "" }]) {
+    it(`rejects a malformed PR search instead of reporting an empty queue: ${JSON.stringify(body)}`, async () => {
+      const { fetchImpl, calls } = scriptedFetch(() => ({ body }));
+      await assert.rejects(searchBotPrs(new GitHub(token, fetchImpl)), /no valid items array/);
+      assert.equal(calls.length, 1);
+    });
+  }
+
+  it("rejects incomplete results even when the search reports no matches", async () => {
+    const { fetchImpl } = scriptedFetch(() => ({ body: { items: [], total_count: 0, incomplete_results: true } }));
+    await assert.rejects(searchBotPrs(new GitHub(token, fetchImpl)), /incomplete results/);
+  });
+
+  it("accepts a genuinely empty search", async () => {
+    const { fetchImpl } = scriptedFetch(() => ({ body: { items: [], total_count: 0, incomplete_results: false } }));
+    assert.deepEqual(await searchBotPrs(new GitHub(token, fetchImpl)), []);
+  });
+
+  for (const total_count of [501, undefined]) {
+    it(`refuses a truncated search after five pages (total ${total_count})`, async () => {
+      const { fetchImpl, calls } = scriptedFetch(() => ({ body: { items: Array.from({ length: 100 }, () => ({ html_url: "https://github.com/x/y/issues/1" })), total_count } }));
+      await assert.rejects(searchBotPrs(new GitHub(token, fetchImpl)), /500-result read limit/);
+      assert.equal(calls.length, 5);
+    });
+  }
+
+  it("counts fetched items, not filtered PRs, at the exact search bound", async () => {
+    const { fetchImpl, calls } = scriptedFetch(() => ({ body: { items: Array.from({ length: 100 }, () => ({ html_url: "https://github.com/x/y/issues/1" })), total_count: 500 } }));
+    assert.deepEqual(await searchBotPrs(new GitHub(token, fetchImpl)), []);
+    assert.equal(calls.length, 5);
+  });
+
   it("searches the bot's open PRs, page by page, and keeps the forge's drafts", async () => {
     const item = (n: number) => ({ html_url: `https://github.com/jmarrero-forge/r/pull/${n}`, pull_request: {}, title: `#${n}`, draft: true, user: { login: "jmarrero-bot" } });
     const { fetchImpl, calls } = scriptedFetch((_m, url) => {
@@ -86,6 +119,21 @@ describe("the bot's PRs other than the forge's drafts", () => {
       const body = fix.routes[url.replace(API, "")];
       return body === undefined ? undefined : { body };
     });
+
+  it("includes broker PRs requesting the operator on needs-you without an org filter", async () => {
+    const broker = JSON.parse(JSON.stringify(fix).replaceAll("jmarrero-bot/homegit", "jmarrero-bot/praxis-credential-broker")) as typeof fix;
+    const { fetchImpl } = scriptedFetch((_m, url) => {
+      const u = new URL(url);
+      if (u.pathname === "/search/issues") return { body: u.searchParams.get("q") === OTHER_QUERY ? broker.searches.other : broker.searches.requested };
+      const body = broker.routes[url.replace(API, "")];
+      return body === undefined ? undefined : { body };
+    });
+    const gh = new GitHub(token, fetchImpl);
+    const read = await loadWaiting(gh, await loadOtherPrs(gh));
+    assert.deepEqual(read.errors, []);
+    const needs = buildNeeds({ entries: buildEntries([], [], new Map(), true, new Set(), { others: read.prs }) });
+    assert.ok(needs.some((n) => n.where === "jmarrero-bot/praxis-credential-broker#45" && n.action === "review"));
+  });
 
   it("searches them and those requesting his review, with GitHub's own qualifiers", async () => {
     assert.equal(OTHER_QUERY, "is:pr is:open author:jmarrero-bot");
@@ -514,6 +562,44 @@ describe("loadFileLines and loadRangeFiles", () => {
 });
 
 describe("submitReview with line comments", () => {
+  for (const failure of ["network", "server", "invalid JSON"] as const) {
+    for (const failAt of [0, 1]) {
+      it(`reports an uncertain ${failure} response after ${failAt} confirmed reviews without retrying`, async () => {
+        const reviews = composeReviews("approve", "", HEAD, {
+          comments: [{ path: "a.rs", line: 2, side: "RIGHT", body: "old", commit: MOVED }],
+        });
+        let posts = 0;
+        const { fetchImpl } = scriptedFetch((method, url) => {
+          if (method === "GET" && url === PULL) return { body: pull() };
+          if (method === "POST" && url === `${PULL}/reviews`) {
+            posts++;
+            return { body: { html_url: `https://github.com/review/${posts}` } };
+          }
+          return undefined;
+        });
+        const gh = new GitHub(token, async (url, init) => {
+          const response = await fetchImpl(url, init);
+          if (init?.method === "POST" && posts === failAt + 1) {
+            // The server received the write; its outcome cannot be inferred
+            // from the response lost or damaged on its way back.
+            if (failure === "network") throw new TypeError("connection lost");
+            return new Response(failure === "server" ? "unavailable" : "{", { status: failure === "server" ? 502 : 201 });
+          }
+          return response;
+        });
+        const sent: number[] = [];
+        await assert.rejects(submitReview(gh, ref, reviews, (i) => sent.push(i)), (e: Error) => {
+          assert.match(e.message, /may have been sent; check GitHub before trying again/);
+          assert.doesNotMatch(e.message, /nothing was sent|the rest didn't/);
+          if (failAt) assert.match(e.message, /1 earlier commit went out/);
+          return true;
+        });
+        assert.deepEqual(sent, failAt ? [0] : []);
+        assert.equal(posts, failAt + 1);
+      });
+    }
+  }
+
   it("posts earlier commits' comments first, then the head's review, and says what went out on failure", async () => {
     const reviews = composeReviews("approve", "", HEAD, {
       comments: [
@@ -535,7 +621,7 @@ describe("submitReview with line comments", () => {
     assert.deepEqual(await run(-1), { out: "https://github.com/review/2", sent: [0, 1], posts: [MOVED, HEAD] });
     const failed = await run(1);
     assert.deepEqual(failed.sent, [0]);
-    assert.match(failed.out, /Line could not be resolved.*the comments on 1 earlier commit went out, the rest didn't/);
+    assert.match(failed.out, /Line could not be resolved.*the comments on 1 earlier commit went out; the rest didn't/);
     assert.match((await run(0)).out, /nothing was sent/);
   });
 });

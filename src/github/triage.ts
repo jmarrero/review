@@ -1,6 +1,4 @@
-// The triage and decisions views' model: board items grouped by their
-// Theme with their Verdict, the P0 lane, and the open decisions. Pure
-// functions over parsed items, so tests feed them synthetic ones.
+// The open decisions' model, shared by the inbox and CLI state.
 //
 // A decision is a question (see answer.ts) that the bot also labels
 // `decision` and titles "D<n>: ...", so they read in order. Besides the
@@ -14,126 +12,8 @@
 // commas or spaces, bare or in code spans.
 
 import { parseQuestion, type Question, unfencedLines } from "../answer.ts";
-import { type Item, NO_PRIORITY, parseIssueUrl, PRIORITY_ORDER } from "./board.ts";
-import { DONE, FORGE_ORG, TRACKER_REPO, TRIAGE_THEMES, type Verdict, VERDICTS } from "./config.ts";
-
-/** A verdict, or none: an item not yet judged, or with a verdict the app doesn't know. */
-export type VerdictBucket = Verdict | "none";
-export const VERDICT_BUCKETS: readonly VerdictBucket[] = [...VERDICTS, "none"];
-
-/** The triage view's filter: every item, or those with one verdict. */
-export type TriageFilter = VerdictBucket | "all";
-export const TRIAGE_FILTERS: readonly TriageFilter[] = ["all", ...VERDICT_BUCKETS];
-
-/** The name of the group of items without a Theme. */
-export const UNTRIAGED = "untriaged";
-
-/**
- * An item's verdict, if the board gives one the app knows. Case and a
- * qualifier after a dash are ignored ("merge-into", "close-duplicate").
- */
-export function verdictOf(item: Pick<Item, "verdict">): Verdict | undefined {
-  const v = item.verdict?.trim().toLowerCase();
-  if (!v) return undefined;
-  return VERDICTS.find((x) => v === x || v.startsWith(`${x}-`));
-}
-
-export function bucketOf(item: Pick<Item, "verdict">): VerdictBucket {
-  return verdictOf(item) ?? "none";
-}
-
-/** Where a merge or close verdict points, if it does. */
-export function verdictTargetOf(item: Pick<Item, "verdict" | "verdictTarget">): string | undefined {
-  const v = verdictOf(item);
-  return v === "merge" || v === "close" ? item.verdictTarget : undefined;
-}
-
-export type VerdictCounts = Record<VerdictBucket, number>;
-
-export function countVerdicts(items: readonly Item[]): VerdictCounts {
-  const counts = Object.fromEntries(VERDICT_BUCKETS.map((b) => [b, 0])) as VerdictCounts;
-  for (const i of items) counts[bucketOf(i)]++;
-  return counts;
-}
-
-export interface ThemeGroup {
-  /** The Theme, or UNTRIAGED. */
-  theme: string;
-  /** All its items, P0 first. */
-  items: Item[];
-  /** The items the filter keeps. */
-  shown: Item[];
-  counts: VerdictCounts;
-}
-
-export interface Triage {
-  /** P0 items that aren't Done, whatever the filter. */
-  p0: Item[];
-  /** One group per Theme, in TRIAGE_THEMES order, then any others by name. */
-  themes: ThemeGroup[];
-  /** Items without a Theme. */
-  untriaged: ThemeGroup;
-  /** Verdict counts over every item, for the filter chips. */
-  counts: VerdictCounts;
-  total: number;
-}
-
-function priorityRank(item: Item): number {
-  const i = PRIORITY_ORDER.indexOf(item.priority ?? NO_PRIORITY);
-  return i < 0 ? PRIORITY_ORDER.length : i;
-}
-
-/** By priority, keeping board order within one (the sort is stable). */
-function byPriority(items: readonly Item[]): Item[] {
-  return [...items].sort((a, b) => priorityRank(a) - priorityRank(b));
-}
-
-function group(theme: string, items: readonly Item[], filter: TriageFilter): ThemeGroup {
-  const sorted = byPriority(items);
-  return {
-    theme,
-    items: sorted,
-    shown: filter === "all" ? sorted : sorted.filter((i) => bucketOf(i) === filter),
-    counts: countVerdicts(sorted),
-  };
-}
-
-function themeRank(theme: string): number {
-  const i = TRIAGE_THEMES.indexOf(theme);
-  return i < 0 ? TRIAGE_THEMES.length : i;
-}
-
-/** Group open board items for the triage view. Done items are dropped, should any come in. */
-export function buildTriage(all: readonly Item[], filter: TriageFilter = "all"): Triage {
-  const items = all.filter((i) => i.status !== DONE);
-  const byTheme = new Map<string, Item[]>();
-  const none: Item[] = [];
-  for (const i of items) {
-    if (!i.theme) {
-      none.push(i);
-      continue;
-    }
-    const list = byTheme.get(i.theme) ?? [];
-    list.push(i);
-    byTheme.set(i.theme, list);
-  }
-  const themes = [...byTheme.keys()]
-    .sort((a, b) => themeRank(a) - themeRank(b) || a.localeCompare(b))
-    .map((t) => group(t, byTheme.get(t) ?? [], filter));
-  return {
-    p0: items.filter((i) => i.priority === "P0"),
-    themes,
-    untriaged: group(UNTRIAGED, none, filter),
-    counts: countVerdicts(items),
-    total: items.length,
-  };
-}
-
-/** The items as the triage view lists them: the P0 lane, then each group's shown items; each once. */
-export function triageOrder(t: Triage): Item[] {
-  const seen = new Set<string>();
-  return [...t.p0, ...[...t.themes, t.untriaged].flatMap((g) => g.shown)].filter((i) => !seen.has(i.nodeId) && seen.add(i.nodeId));
-}
+import { type Item, parseIssueUrl } from "./board.ts";
+import { FORGE_ORG, TRACKER_REPO } from "./config.ts";
 
 /** A decision issue, parsed. */
 export interface Decision {

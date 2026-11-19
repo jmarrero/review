@@ -105,11 +105,11 @@ describe("missingScopes", () => {
   const missing = (h: string | undefined) => missingScopes(h, CLASSIC_SCOPES).map((n) => n.any[0]);
   const cases: [string | undefined, string[]][] = [
     [undefined, []],
-    ["", ["public_repo", "read:project"]],
+    ["", ["read:project"]],
     ["repo, project", []],
     ["public_repo, read:project, gist", []],
     ["repo,gist", ["read:project"]],
-    ["read:project", ["public_repo"]],
+    ["read:project", []],
   ];
   for (const [header, want] of cases) it(String(header), () => assert.deepEqual(missing(header), want));
 });

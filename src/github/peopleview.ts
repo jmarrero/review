@@ -1,6 +1,6 @@
 import { h } from "../dom.ts";
 import type { People } from "./people.ts";
-import { age } from "./view.ts";
+import { ageLabel } from "./view.ts";
 
 export interface PeopleHooks {
   done(id: string): Promise<void>;
@@ -27,7 +27,7 @@ export function peopleView(people: People | undefined, now: number, hooks: Peopl
     const status = h("span", { role: "status", class: "note" }, row.markError ?? "");
     const article = h("article", { class: "people-row" },
       h("a", { href: row.url }, `${row.ref.owner}/${row.ref.repo}#${row.ref.number} ${row.title}`),
-      h("span", { class: "tag" }, ` · ${row.author} · ${row.unlocated ? "mention (not located)" : `request ${row.requestedAt ? age(row.requestedAt, now) : "age unknown"}`} · CI ${row.ci}`),
+      h("span", { class: "tag" }, ` · ${row.author} · `, row.unlocated ? "mention (not located)" : h("span", {}, "request ", ageLabel(row.requestedAt, now)), ` · CI ${row.ci}`),
       h("a", { href: `${row.url}${row.action === "Review" ? "/files" : "#issuecomment-new"}`, class: "action" }, row.action), status,
     );
     if (row.notificationIds.length) {

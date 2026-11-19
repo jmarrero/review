@@ -1,0 +1,20 @@
+[
+  {
+    "id": 20,
+    "html_url": "https://github.com/jmarrero-forge/bot-ops/issues/1#issuecomment-20",
+    "user": {
+      "login": "jmarrero-bot"
+    },
+    "updated_at": "2026-10-25T09:00:00Z",
+    "body": "<!-- agent-board-holds v1 -->\nHolds as of 2026-10-25T09:00:00Z. Written by `agent-board pass`; the review app reads the JSON below.\n\n```json\n{\"schema\":\"agent-board/holds/v1\",\"at\":\"2026-10-25T09:00:00Z\",\"truncated\":0,\"holds\":[\n{\"item\":null,\"url\":null,\"epic\":false,\"kind\":\"wip\",\"reason\":\"4 of 4 runs active\",\"operator\":false,\"priority\":null,\"question\":null},\n{\"item\":\"jmarrero-forge/tracker#596\",\"url\":\"https://github.com/jmarrero-forge/tracker/issues/596\",\"epic\":true,\"kind\":\"epic-unplanned\",\"reason\":\"its planning request https://github.com/jmarrero-forge/tracker/issues/596#issuecomment-1 got no plan; planned once more from 2026-10-26T02:00:00Z\",\"operator\":false,\"priority\":\"P1\",\"question\":null},\n{\"item\":\"jmarrero-forge/tracker#1000\",\"url\":\"https://github.com/jmarrero-forge/tracker/issues/1000\",\"epic\":false,\"kind\":\"needs-human\",\"reason\":\"labelled needs-human\",\"operator\":true,\"priority\":\"P0\",\"question\":\"Which target?\"}\n]}\n```\n"
+  },
+  {
+    "id": 21,
+    "html_url": "https://github.com/jmarrero-forge/bot-ops/issues/1#issuecomment-21",
+    "user": {
+      "login": "jmarrero-bot"
+    },
+    "updated_at": "2026-10-26T03:10:00Z",
+    "body": "<!-- agent-board-holds v1 -->\nHolds as of 2026-10-26T03:10:00Z. Written by `agent-board pass`; the review app reads the JSON below.\n\n```json\n{\"schema\":\"agent-board/holds/v1\",\"at\":\"2026-10-26T03:10:00Z\",\"truncated\":0,\"wip\":{\"limit\":4,\"in_flight\":4},\"pass\":{\"mode\":\"actions\",\"candidates\":7,\"started\":1,\"live_epics\":2},\"holds\":[\n{\"item\":null,\"url\":null,\"epic\":false,\"kind\":\"wip\",\"reason\":\"4 of 4 runs active\",\"operator\":false,\"priority\":null,\"question\":null},\n{\"item\":\"jmarrero-forge/tracker#596\",\"url\":\"https://github.com/jmarrero-forge/tracker/issues/596\",\"epic\":true,\"kind\":\"epic-unplanned\",\"reason\":\"its planning request https://github.com/jmarrero-forge/tracker/issues/596#issuecomment-1 got no plan; planned once more from 2026-10-26T02:00:00Z\",\"operator\":false,\"priority\":\"P1\",\"question\":null},\n{\"item\":\"jmarrero-forge/tracker#1000\",\"url\":\"https://github.com/jmarrero-forge/tracker/issues/1000\",\"epic\":false,\"kind\":\"needs-human\",\"reason\":\"labelled needs-human\",\"operator\":true,\"priority\":\"P0\",\"question\":\"Which target?\"}\n]}\n```\n"
+  }
+]

@@ -68,13 +68,6 @@ export interface CacheOptions {
   now?: () => number;
 }
 
-/** How a view marks cached data, e.g. "cached · 5 min ago". */
-export function cachedLabel(fetchedAt: number, now: number): string {
-  const min = Math.max(0, Math.floor((now - fetchedAt) / 60_000));
-  const age = min < 1 ? "just now" : min < 120 ? `${min} min ago` : min < 48 * 60 ? `${Math.floor(min / 60)} h ago` : `${Math.floor(min / 1440)} d ago`;
-  return `cached · ${age}`;
-}
-
 /** The hex SHA-256 of a token, or undefined where WebCrypto is missing. */
 export async function tokenHash(token: string): Promise<string | undefined> {
   try {
